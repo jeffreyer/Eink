@@ -1,0 +1,33 @@
+{
+  "name": "Lua",
+  "version": "5.4.7",
+  "description": "Lua scripting language optimized for ESP32",
+  "keywords": "lua, scripting, embedded",
+  "repository": {
+    "type": "git",
+    "url": "https://www.lua.org"
+  },
+  "build": {
+    "flags": [
+      "-DLUA_32BITS",
+      "-DLUA_USE_C89",
+      "-DLUA_COMPAT_5_3",
+      "-Wno-unused-parameter",
+      "-Wno-sign-compare"
+    ],
+    "srcDir": "src",
+    "srcFilter": [
+      "+<*.c>",
+      "-<lua.c>",
+      "-<luac.c>",
+      "-<linit.c>",
+      "+<linit_esp32.c>",
+      "-<liolib.c>",
+      "-<loslib.c>",
+      "-<ldblib.c>",
+      "-<loadlib.c>",
+      "-<lcorolib.c>",
+      "-<lutf8lib.c>"
+    ]
+  }
+}
