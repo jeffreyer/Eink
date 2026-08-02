@@ -12,6 +12,8 @@
 #include "battery.h"
 #include "cmd_handler.h"
 #include "eink.h"
+#include <SPIFFS.h>
+#include "Display_EPD_W21.h"
 
 // Button status enumeration for better code readability
 enum ButtonStatus {
@@ -44,10 +46,10 @@ void main_save_config(){
   prefs.putInt("brightness",user_brightness_max);
   prefs.end();
 
-  const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
-  if (module && module->unload) {
-    module->unload();
-  }
+  // const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
+  // if (module && module->unload) {
+  //   module->unload();
+  // }
 }
 
 int32_t app_get_page_count(void) {
@@ -245,7 +247,11 @@ void setup() {
   pinMode(KEY_UP, INPUT);
   pinMode(KEY_DOWN, INPUT);
 
-  // rgb_init();
+  SPIFFS.begin(true);
+
+  init_eink();
+  EPD_init_Fast2();
+  EPD_sleep();
 
   // // 6. 检查并执行自动 OTA 更新（如果有 firmware.bin）
   // if (auto_ota_check_and_update()) {
@@ -254,33 +260,32 @@ void setup() {
   //   log_e("[Setup] OTA update failed or completed, continuing normal boot");
   // }
 
-  // // 7. 恢复时区设置
-  // restore_timezone();
+  // 7. 恢复时区设置
+  restore_timezone();
 
-  // // 8. 初始化时间校准模块
-  // TimeCalibration::init();
+  // 8. 初始化时间校准模块
+  TimeCalibration::init();
+
+  main_load_config();
 
   if (is_chk_bat)
     check_battery_init();
 
-  // main_load_config();
+  module_registry_init();
 
-  // module_registry_init();
+  page_index = module_registry_normalize_index(page_index);
 
-  // page_index = module_registry_normalize_index(page_index);
-
-  // const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
-  // if (module && module->setup) {
-  //   module->setup();
-  // }
+  const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
+  if (module && module->setup) {
+    Serial.println("Setting up module: " + String(module->name));
+    module->setup();
+  }
 
   sleep_manager_init();
 
   sleep_manager_start();
 
-  init_eink();
-
-  // btn_status = BTN_BLE;
+  btn_status = BTN_BLE;
 }
 
 void loop() {
@@ -300,18 +305,18 @@ void loop() {
 
   ble_config_update();
 
+  sleep_manager_update();
+
   if (ble_config_is_enabled()) {
     ble_config_render_mode();
     delay(30);
     return;
   }
 
-  sleep_manager_update();
-
-  // const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
-  // if (module && module->loop) {
-  //   module->loop();
-  // }
+  const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
+  if (module && module->loop) {
+    module->loop();
+  }
 
   delay(10);
 

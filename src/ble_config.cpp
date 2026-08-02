@@ -6,6 +6,7 @@
 #include "sleep_manager.h"
 #include "touch_icons.h"
 #include "time_calibration.h"
+#include "gallery.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <sys/time.h>
@@ -85,6 +86,13 @@ static String s_config_def_module_id;
 static String s_config_def_buffer;
 static size_t s_config_def_size = 0;
 static size_t s_config_def_received = 0;
+
+// Gallery image upload state
+static bool s_gallery_upload_in_progress = false;
+static String s_gallery_upload_filename;
+static size_t s_gallery_upload_size = 0;
+static size_t s_gallery_upload_received = 0;
+static uint8_t* s_gallery_upload_buffer = nullptr;
 
 // Simple base64 decode table
 static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -298,8 +306,7 @@ static void set_status(const String& s) {
 }
 
 static void draw_ble_icon(void) {
-    // Use the unified icon drawing function from touch_icons
-    show_ble_hold_hint(false);
+
 }
 
 static void apply_command(const String& cmd) {
@@ -584,6 +591,213 @@ static void apply_command(const String& cmd) {
         set_status(status_json(false));  // 不返回模块列表，小程序端会主动请求
         return;
     }
+
+    // ============= 相册功能命令处理 =============
+
+    // 获取相册图片列表
+    if (cmd.indexOf("\"gallery_list\"") >= 0) {
+        std::vector<ImageInfo> images = gallery_list_images();
+
+        String response = "{\"ok\":true,\"images\":[";
+        for (size_t i = 0; i < images.size(); i++) {
+            if (i > 0) response += ",";
+            response += "{";
+            response += "\"filename\":\"" + images[i].filename + "\",";
+            response += "\"size\":" + String(images[i].size) + ",";
+            response += "\"timestamp\":" + String(images[i].timestamp);
+            response += "}";
+        }
+        response += "],\"count\":" + String(images.size()) + "}";
+
+        set_status(response);
+        return;
+    }
+
+    // 删除图片
+    if (cmd.indexOf("\"gallery_delete\"") >= 0) {
+        String filename;
+        if (extract_string(cmd, "filename", &filename)) {
+            bool success = gallery_delete_image(filename.c_str());
+            String response = success ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Delete failed\"}";
+            set_status(response);
+        }
+        return;
+    }
+
+    // 显示指定图片
+    if (cmd.indexOf("\"gallery_show\"") >= 0) {
+        String filename;
+        int index = -1;
+
+        if (extract_string(cmd, "filename", &filename)) {
+            bool success = gallery_display_image(filename.c_str());
+            String response = success ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Display failed\"}";
+            set_status(response);
+        } else if (extract_int(cmd, "index", &index)) {
+            gallery_set_current_index(index);
+            // 模块的loop会处理显示
+            set_status("{\"ok\":true}");
+        }
+        return;
+    }
+
+    // 开始上传图片
+    if (cmd.indexOf("\"gallery_upload_start\"") >= 0) {
+        String filename;
+        int size = 0;
+
+        if (extract_string(cmd, "filename", &filename) && extract_int(cmd, "size", &size)) {
+            // 验证尺寸（200*200*2bit = 10000字节）
+            if (size != 10000) {
+                set_status("{\"ok\":false,\"error\":\"Invalid image size\"}");
+                return;
+            }
+
+            s_gallery_upload_in_progress = true;
+            s_gallery_upload_filename = filename;
+            s_gallery_upload_size = size;
+            s_gallery_upload_received = 0;
+
+            // 分配缓冲区
+            s_gallery_upload_buffer = (uint8_t*)malloc(size);
+            if (!s_gallery_upload_buffer) {
+                s_gallery_upload_in_progress = false;
+                set_status("{\"ok\":false,\"error\":\"Memory allocation failed\"}");
+                return;
+            }
+
+            set_status("{\"ok\":true,\"upload_ready\":true}");
+        }
+        return;
+    }
+
+    // 接收图片数据块
+    if (cmd.indexOf("\"gallery_upload_chunk\"") >= 0 && s_gallery_upload_in_progress) {
+        int data_pos = cmd.indexOf("\"data\"");
+        if (data_pos >= 0) {
+            int start = cmd.indexOf("\"", data_pos + 7) + 1;
+            int end = cmd.indexOf("\"", start);
+            String encoded = cmd.substring(start, end);
+
+            // Base64 解码
+            size_t max_decoded_len = (encoded.length() * 3) / 4 + 1;
+            uint8_t* decoded = (uint8_t*)malloc(max_decoded_len);
+            if (decoded) {
+                size_t decoded_len = base64_decode(encoded.c_str(), encoded.length(), decoded);
+
+                if (s_gallery_upload_buffer && decoded_len > 0) {
+                    size_t copy_len = min(decoded_len, s_gallery_upload_size - s_gallery_upload_received);
+                    memcpy(s_gallery_upload_buffer + s_gallery_upload_received, decoded, copy_len);
+                    s_gallery_upload_received += copy_len;
+                }
+                free(decoded);
+            }
+        }
+        return;
+    }
+
+    // 完成图片上传
+    if (cmd.indexOf("\"gallery_upload_complete\"") >= 0 && s_gallery_upload_in_progress) {
+        bool success = false;
+
+        if (s_gallery_upload_received == s_gallery_upload_size) {
+            success = gallery_save_image(s_gallery_upload_filename.c_str(),
+                                        s_gallery_upload_buffer,
+                                        s_gallery_upload_size);
+        }
+
+        // 清理
+        if (s_gallery_upload_buffer) {
+            free(s_gallery_upload_buffer);
+            s_gallery_upload_buffer = nullptr;
+        }
+        s_gallery_upload_in_progress = false;
+        s_gallery_upload_filename = "";
+        s_gallery_upload_size = 0;
+        s_gallery_upload_received = 0;
+
+        String response = success ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Save failed\"}";
+        set_status(response);
+        return;
+    }
+
+    // 获取图片数据
+    if (cmd.indexOf("\"gallery_get\"") >= 0) {
+        String filename;
+        if (extract_string(cmd, "filename", &filename)) {
+            Serial.printf("Gallery get: %s\n", filename.c_str());
+
+            // 读取图片文件（使用与gallery.cpp相同的路径）
+            String filepath = "/spiffs/gallery/" + filename;
+            FILE* file = fopen(filepath.c_str(), "rb");
+
+            if (!file) {
+                Serial.printf("File not found: %s\n", filepath.c_str());
+                set_status("{\"ok\":false,\"error\":\"File not found\"}");
+                return;
+            }
+
+            Serial.println("File opened successfully");
+
+            // 获取文件大小
+            fseek(file, 0, SEEK_END);
+            size_t filesize = ftell(file);
+            fseek(file, 0, SEEK_SET);
+
+            Serial.printf("File size: %d bytes\n", filesize);
+
+            // 读取文件内容
+            uint8_t* buffer = (uint8_t*)malloc(filesize);
+            if (!buffer) {
+                fclose(file);
+                set_status("{\"ok\":false,\"error\":\"Memory allocation failed\"}");
+                return;
+            }
+
+            size_t read_size = fread(buffer, 1, filesize, file);
+            fclose(file);
+
+            if (read_size != filesize) {
+                free(buffer);
+                Serial.println("Read failed");
+                set_status("{\"ok\":false,\"error\":\"Read failed\"}");
+                return;
+            }
+
+            Serial.println("File read successfully, encoding to Base64...");
+
+            // 直接Base64编码原始2bit数据（10000字节）
+            const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            String base64Data = "";
+
+            for (size_t i = 0; i < filesize; i += 3) {
+                uint32_t triple = (i < filesize ? buffer[i] << 16 : 0)
+                                | (i + 1 < filesize ? buffer[i + 1] << 8 : 0)
+                                | (i + 2 < filesize ? buffer[i + 2] : 0);
+
+                base64Data += base64_chars[(triple >> 18) & 0x3F];
+                base64Data += base64_chars[(triple >> 12) & 0x3F];
+                base64Data += (i + 1 < filesize) ? base64_chars[(triple >> 6) & 0x3F] : '=';
+                base64Data += (i + 2 < filesize) ? base64_chars[triple & 0x3F] : '=';
+            }
+
+            free(buffer);
+
+            Serial.printf("Base64 encoded, length: %d\n", base64Data.length());
+
+            // 直接发送完整数据，让set_status自动分块
+            String response = "{\"image_data\":\"" + base64Data + "\"}";
+
+            Serial.println("Sending image data via set_status (auto-chunked)...");
+            set_status(response);
+            Serial.println("Image data sent successfully");
+
+            return;
+        }
+    }
+
+    // ============= 相册功能命令处理结束 =============
+
 
     if (extract_int(cmd, "brightness", &value)) {
         value = constrain(value, 0, 255);
@@ -1124,6 +1338,8 @@ void ble_config_stop(void) {
 
 void ble_config_update(void) {
     if (!s_ble_enabled) return;
+    if (s_client_connected)
+        sleep_manager_reset_idle_timer(); // 重置空闲计时器，防止进入休眠
     if (!s_has_pending_cmd) return;
 
     String cmd = s_pending_cmd;
@@ -1162,7 +1378,7 @@ void ble_config_render_mode(void) {
     if (!s_ble_enabled) return;
 
     // 不显示颜色时，显示 BLE 图标
-    draw_ble_icon();
+    // draw_ble_icon();
 }
 
 void ble_config_unbind(void) {

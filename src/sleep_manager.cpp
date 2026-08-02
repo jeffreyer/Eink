@@ -6,6 +6,7 @@
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include "driver/rtc_io.h"
+#include "gallery.h"
 
 uint8_t brightness_max=10;
 uint8_t user_brightness_max=10;
@@ -42,19 +43,27 @@ void enter_deep_sleep(void) {
   //     ESP_GPIO_WAKEUP_GPIO_LOW
   // );
 
-  // esp_deep_sleep_start();
+  if (gallery_get_display_mode()==1 && !gallery_get_images().empty()) {
+    esp_sleep_enable_timer_wakeup(
+        gallery_get_cycle_interval() * 60 * 1000000ULL   // 单位：微秒
+    );
+    Serial.printf("Gallery: Cycle mode enabled, entering sleep for %d minutes\n", gallery_get_cycle_interval());
+  }
+
+  esp_deep_sleep_start();
 
 
-  gpio_wakeup_enable((gpio_num_t)KEY_DOWN, GPIO_INTR_LOW_LEVEL);
+  // gpio_wakeup_enable((gpio_num_t)KEY_UP, GPIO_INTR_LOW_LEVEL);
+  // gpio_wakeup_enable((gpio_num_t)KEY_DOWN, GPIO_INTR_LOW_LEVEL);
 
-  // 设置唤醒源为 GPIO（必须调用）
-  esp_sleep_enable_gpio_wakeup();
-  esp_light_sleep_start();
+  // // 设置唤醒源为 GPIO（必须调用）
+  // esp_sleep_enable_gpio_wakeup();
+  // esp_light_sleep_start();
 
-  sleep_manager_reset_idle_timer();
-  Serial.end();
-  delay(100);
-  Serial.begin(115200);
+  // sleep_manager_reset_idle_timer();
+  // Serial.end();
+  // delay(100);
+  // Serial.begin(115200);
 }
 
 int sleep_manager_init() {
@@ -79,7 +88,6 @@ int sleep_manager_start(void) {
 
 void sleep_manager_reset_idle_timer() {
   last_active = millis();
-  Serial.println("Sleep manager: Idle timer reset");
 }
 
 void sleep_manager_update() {

@@ -1,6 +1,7 @@
 ﻿#include "module_registry.h"
 #include "common.h"
 #include "lua_hardware_api.h"
+#include "gallery.h"
 #include <Preferences.h>
 #include <SPIFFS.h>
 #include <vector>
@@ -17,6 +18,21 @@ extern "C" {
 // Built-in modules (static) - configs now stored in NVS as JSON
 // 移除 const 以便在初始化时更新 config_count
 static module_descriptor_t k_builtin_modules[] = {
+    {
+        .id = "gallery",
+        .name = "相册",
+        .version = "1.0.0",
+        .author = "System",
+        .description = "照片相册展示",
+        .host = "native",
+        .runtime = "esp32",
+        .script_path = nullptr,
+        .setup = gallery_setup,
+        .unload = gallery_unload,
+        .loop = gallery_loop,
+        .config_count = 0,
+        .built_in = true
+    }
 };
 
 // Dynamic modules storage
@@ -313,10 +329,10 @@ static void scan_dynamic_modules(void) {
   }
 
   // Scan extflash
-  int ret=scan_directory_for_modules("/extflash");
-  if (ret==-1){
-    xTaskCreatePinnedToCore(delay_scan_ext_modules, "delay_scan_ext_mod", 4096, NULL, 6, NULL, 0);
-  }
+  // int ret=scan_directory_for_modules("/extflash");
+  // if (ret==-1){
+  //   xTaskCreatePinnedToCore(delay_scan_ext_modules, "delay_scan_ext_mod", 4096, NULL, 6, NULL, 0);
+  // }
 
   Serial.print("Module registry: Found ");
   Serial.print(s_dynamic_module_count);

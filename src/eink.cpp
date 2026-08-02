@@ -2,7 +2,6 @@
 //EPD
 #include "Display_EPD_W21_spi.h"
 #include "Display_EPD_W21.h"
-#include "Ap_29demo.h"
 #include "eink.h"
 #include "GUI_Paint.h"
 

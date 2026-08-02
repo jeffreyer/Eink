@@ -8,9 +8,6 @@
 
 #define KEY_UP 8
 #define KEY_DOWN 9
-#define LED_SWITCH_PIN 4
-#define DATA_PIN     48
-#define TOUCH_PIN    12
 
 //加速度计
 #define LIS3DH
