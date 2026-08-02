@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <Preferences.h>
 #include "sleep_manager.h"
+#include "ble_config.h"
 
 // 墨水屏尺寸定义
 #define EPD_WIDTH 200
@@ -27,10 +28,81 @@ static bool s_initialized = false;
 // 相册配置
 static int s_display_mode = 0;           // 0=固定显示, 1=循环显示
 static int s_cycle_interval = 60;        // 循环间隔时间（分钟）1-1440
+static int s_rotation = 0;               // 显示方向（0, 90, 180, 270度）
 static unsigned long s_last_display_time = 0;  // 上次显示时间
 
 // 前置声明
 static bool gallery_display_by_index(int index);
+static void rotate_image(uint8_t* image, int width, int height, int degrees);
+
+// 旋转图像数据（2位色深位图格式，每字节4个像素）
+static void rotate_image(uint8_t* image, int width, int height, int degrees) {
+    if (degrees == 0) return;
+
+    // 2位色深，每像素2位，每字节4个像素
+    int total_bytes = width * height / 4;
+
+    // 创建临时缓冲区
+    uint8_t* temp = (uint8_t*)malloc(total_bytes);
+    if (!temp) {
+        Serial.println("Gallery: Failed to allocate rotation buffer");
+        return;
+    }
+
+    memcpy(temp, image, total_bytes);
+    memset(image, 0, total_bytes);
+
+    // 辅助函数：获取像素值（2位）
+    auto get_pixel = [temp, width](int x, int y) -> uint8_t {
+        int pixel_index = y * width + x;
+        int byte_index = pixel_index / 4;
+        int bit_offset = (3 - (pixel_index % 4)) * 2;  // 高位在前
+        return (temp[byte_index] >> bit_offset) & 0x03;
+    };
+
+    // 辅助函数：设置像素值（2位）
+    auto set_pixel = [image, width](int x, int y, uint8_t value) {
+        int pixel_index = y * width + x;
+        int byte_index = pixel_index / 4;
+        int bit_offset = (3 - (pixel_index % 4)) * 2;  // 高位在前
+        image[byte_index] |= (value & 0x03) << bit_offset;
+    };
+
+    if (degrees == 90) {
+        // 90度顺时针旋转: (x,y) -> (height-1-y, x)
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint8_t pixel = get_pixel(x, y);
+                int new_x = height - 1 - y;
+                int new_y = x;
+                set_pixel(new_x, new_y, pixel);
+            }
+        }
+    } else if (degrees == 180) {
+        // 180度旋转: (x,y) -> (width-1-x, height-1-y)
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint8_t pixel = get_pixel(x, y);
+                int new_x = width - 1 - x;
+                int new_y = height - 1 - y;
+                set_pixel(new_x, new_y, pixel);
+            }
+        }
+    } else if (degrees == 270) {
+        // 270度顺时针旋转: (x,y) -> (y, width-1-x)
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint8_t pixel = get_pixel(x, y);
+                int new_x = y;
+                int new_y = width - 1 - x;
+                set_pixel(new_x, new_y, pixel);
+            }
+        }
+    }
+
+    free(temp);
+    Serial.printf("Gallery: Image rotated %d degrees (2-bit format)\n", degrees);
+}
 
 // 检查是否需要循环切换（由main.cpp的loop调用）
 bool gallery_should_cycle() {
@@ -185,11 +257,22 @@ bool gallery_display_image(const char* filename) {
         return false;
     }
 
+    if (ble_config_is_enabled()) {
+        s_display_mode = load_config_ns("gallery", "display_mode");
+        s_cycle_interval = load_config_ns("gallery", "cycle_interval");
+        s_rotation = load_config_ns("gallery", "rotation");
+    }
+
+    // 应用旋转
+    if (s_rotation != 0) {
+        rotate_image(BlackImage, EPD_WIDTH, EPD_HEIGHT, s_rotation);
+    }
+
     EPD_init_Fast2();
     PIC_display(BlackImage);
     EPD_sleep();
 
-    Serial.printf("Gallery: Displayed %s\n", filename);
+    Serial.printf("Gallery: Displayed %s (rotation: %d deg)\n", filename, s_rotation);
     return true;
 }
 
@@ -260,6 +343,7 @@ int gallery_setup(void) {
     // 从common.cpp的配置系统加载配置
     s_display_mode = load_config_ns("gallery", "display_mode");
     s_cycle_interval = load_config_ns("gallery", "cycle_interval");
+    s_rotation = load_config_ns("gallery", "rotation");
     s_current_image_index = load_config_ns("gallery", "img_index");
 
     // 使用默认值如果配置为0
@@ -274,23 +358,18 @@ int gallery_setup(void) {
     if (s_cycle_interval < 1 || s_cycle_interval > 1440) {
         s_cycle_interval = 60;
     }
+    if (s_rotation != 0 && s_rotation != 90 && s_rotation != 180 && s_rotation != 270) {
+        s_rotation = 0;
+    }
 
-    Serial.printf("Gallery config: mode=%d, interval=%d min\n", s_display_mode, s_cycle_interval);
+    Serial.printf("Gallery config: mode=%d, interval=%d min, rotation=%d deg\n",
+                  s_display_mode, s_cycle_interval, s_rotation);
 
     // 确保SPIFFS已挂载
     if (!SPIFFS.begin(true)) {
         Serial.println("Gallery: SPIFFS mount failed");
         return -1;
     }
-
-    // 确保相册目录存在
-    // struct stat st;
-    // if (stat(GALLERY_DIR, &st) != 0) {
-    //     if (mkdir(GALLERY_DIR, 0755) != 0) {
-    //         Serial.println("Gallery: Failed to create gallery directory");
-    //         return -1;
-    //     }
-    // }
 
     // 扫描图片列表
     s_image_list = gallery_list_images();
