@@ -34,6 +34,13 @@ int32_t module_registry_next_enabled(int32_t index);
 int32_t module_registry_normalize_index(int32_t index);
 String module_registry_manifest_json(int32_t index);
 
+// 标记指定模块的配置已变更（NVS 已保存，由 BLE 配置写入时调用）
+void module_registry_mark_config_changed(const char* module_id);
+// 主循环中调用：若当前模块配置被修改，重新加载该模块（unload + setup）
+void module_registry_update(void);
+// 强制重新加载当前模块（unload + setup），用于手动刷新显示
+void module_registry_refresh_current(void);
+
 #ifdef __cplusplus
 }
 #endif

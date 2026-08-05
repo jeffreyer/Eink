@@ -62,6 +62,9 @@ static int dynamic_lua_unload(void);
 // Current dynamic module being executed
 static int s_current_dynamic_module = -1;
 
+// 待处理配置变更的模块 id（BLE 写入 NVS 后标记，主循环消费）
+static char s_pending_config_module[64] = {0};
+
 static String json_escape(const char* value) {
   String s;
   if (!value) return s;
@@ -383,6 +386,71 @@ void module_registry_init(void) {
   }
 
   Serial.println("Module registry: Initialization complete");
+}
+
+// 标记指定模块的配置已变更（NVS 已保存）
+void module_registry_mark_config_changed(const char* module_id) {
+  if (!module_id || strlen(module_id) == 0) {
+    return;
+  }
+  snprintf(s_pending_config_module, sizeof(s_pending_config_module), "%s", module_id);
+  Serial.print("Module registry: Config changed for ");
+  Serial.println(module_id);
+}
+
+// 重载指定索引的模块（unload + setup）
+static void reload_module_at(int32_t index) {
+  if (index < 0 || index >= s_total_module_count) {
+    return;
+  }
+
+  const module_descriptor_t* module = s_all_modules[index];
+  if (!module) {
+    return;
+  }
+
+  if (!module_registry_is_enabled((uint8_t)index)) {
+    return;
+  }
+
+  Serial.print("Module registry: Reloading module ");
+  Serial.println(module->id);
+
+  if (module->unload) {
+    module->unload();
+  }
+  if (module->setup) {
+    module->setup();
+  }
+}
+
+// 主循环中调用：若当前模块的配置被修改，重新加载该模块（unload + setup）
+void module_registry_update(void) {
+  if (s_pending_config_module[0] == 0) {
+    return;
+  }
+
+  String changed_id = String(s_pending_config_module);
+  s_pending_config_module[0] = 0;
+
+  if (page_index < 0 || page_index >= s_total_module_count) {
+    return;
+  }
+
+  const module_descriptor_t* module = s_all_modules[page_index];
+  if (!module || !module->id || changed_id != module->id) {
+    // 配置变更属于其他模块：切换过去时 setup() 会重新读取，无需处理
+    return;
+  }
+
+  reload_module_at(page_index);
+}
+
+// 强制重新加载当前模块（unload + setup），用于手动刷新显示
+void module_registry_refresh_current(void) {
+  // 手动刷新会立即应用最新配置，清除待处理标记避免退出 BLE 时重复重载
+  s_pending_config_module[0] = 0;
+  reload_module_at(page_index);
 }
 
 uint8_t module_registry_count(void) {

@@ -353,6 +353,13 @@ static void apply_command(const String& cmd) {
         return;
     }
 
+    // 处理模块刷新显示请求（小程序“刷新显示”按钮）
+    if (cmd.indexOf("\"module_refresh\"") >= 0) {
+        module_registry_refresh_current();
+        set_status("{\"ok\":true,\"module_refresh\":true}");
+        return;
+    }
+
     // 处理文件上传开始
     if (cmd.indexOf("\"upload_start\"") >= 0) {
         String module_id, filename;
@@ -1002,6 +1009,11 @@ static void apply_command(const String& cmd) {
                     save_config_string(key, string_value);
                 }
             }
+        }
+
+        // 标记模块配置已变更，主循环退出 BLE 配置模式后会自动重载模块
+        if (separator > 0) {
+            module_registry_mark_config_changed(ns.c_str());
         }
 
         set_status(status_json());

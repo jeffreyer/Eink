@@ -7,6 +7,9 @@
 #include "common.h"
 #include "sleep_manager.h"
 #include "time_calibration.h"
+#include "eink.h"
+#include "GUI_Paint.h"
+#include "Display_EPD_W21.h"
 
 extern "C" {
 #include "lua.h"
@@ -116,6 +119,18 @@ static int lua_time_delay(lua_State* L) {
   return 0;
 }
 
+// time.get() -> returns hour, minute, second
+static int lua_time_get(lua_State* L) {
+  time_t now = TimeCalibration::get_calibrated_time();
+  struct tm timeinfo;
+  localtime_r(&now, &timeinfo);
+
+  lua_pushinteger(L, timeinfo.tm_hour);
+  lua_pushinteger(L, timeinfo.tm_min);
+  lua_pushinteger(L, timeinfo.tm_sec);
+  return 3;
+}
+
 // time.now() -> returns table with current time {year, month, day, hour, min, sec, wday}
 static int lua_time_now(lua_State* L) {
   // 使用校准后的时间而不是原始系统时间
@@ -152,7 +167,327 @@ static int lua_time_now(lua_State* L) {
 static const luaL_Reg time_lib[] = {
   {"millis", lua_time_millis},
   {"delay", lua_time_delay},
+  {"get", lua_time_get},
   {"now", lua_time_now},
+  {NULL, NULL}
+};
+
+// ============================================================================
+// Display API (e-ink)
+// ============================================================================
+
+// 前向声明（GB2312 中文字库渲染，定义于本文件后方）
+static bool gb_map_load();
+static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* ascii_font, UWORD color);
+
+// 画布缓冲（定义于 eink.cpp）
+extern unsigned char BlackImage[ALLSCREEN_BYTES];
+
+// Lua 颜色值(0=黑,1=白,2=黄,3=红) -> 画布颜色值
+static UWORD lua_color_to_paint(int color) {
+  switch (color) {
+    case 1:  return WHITE0;   // 白
+    case 2:  return YELLOW0;  // 黄
+    case 3:  return RED0;     // 红
+    case 0:
+    default: return BLACK0;   // 黑
+  }
+}
+
+static void display_prepare_canvas() {
+  Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, WHITE0);
+  Paint_SetScale(4);
+  Paint_SelectImage(BlackImage);
+}
+
+// display.clear()
+static int lua_display_clear(lua_State* L) {
+  display_prepare_canvas();
+  Paint_Clear(WHITE0);
+  return 0;
+}
+
+// display.pixel(x, y, color)
+static int lua_display_pixel(lua_State* L) {
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
+  int c = (int)luaL_optnumber(L, 3, 0);
+  display_prepare_canvas();
+  Paint_SetPixel(x, y, lua_color_to_paint(c));
+  return 0;
+}
+
+// display.line(x0, y0, x1, y1, color)
+static int lua_display_line(lua_State* L) {
+  int x0 = (int)luaL_checknumber(L, 1);
+  int y0 = (int)luaL_checknumber(L, 2);
+  int x1 = (int)luaL_checknumber(L, 3);
+  int y1 = (int)luaL_checknumber(L, 4);
+  int c = (int)luaL_optnumber(L, 5, 0);
+  display_prepare_canvas();
+  Paint_DrawLine(x0, y0, x1, y1, lua_color_to_paint(c), LINE_STYLE_SOLID, DOT_PIXEL_1X1);
+  return 0;
+}
+
+// display.rect(x, y, w, h, color)
+static int lua_display_rect(lua_State* L) {
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
+  int w = (int)luaL_checknumber(L, 3);
+  int h = (int)luaL_checknumber(L, 4);
+  int c = (int)luaL_optnumber(L, 5, 0);
+  display_prepare_canvas();
+  Paint_DrawRectangle(x, y, x + w, y + h, lua_color_to_paint(c), DRAW_FILL_EMPTY, DOT_PIXEL_1X1);
+  return 0;
+}
+
+// display.fill_rect(x, y, w, h, color)
+static int lua_display_fill_rect(lua_State* L) {
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
+  int w = (int)luaL_checknumber(L, 3);
+  int h = (int)luaL_checknumber(L, 4);
+  int c = (int)luaL_optnumber(L, 5, 0);
+  display_prepare_canvas();
+  Paint_DrawRectangle(x, y, x + w, y + h, lua_color_to_paint(c), DRAW_FILL_FULL, DOT_PIXEL_1X1);
+  return 0;
+}
+
+// display.circle(x, y, r, color)
+static int lua_display_circle(lua_State* L) {
+  int cx = (int)luaL_checknumber(L, 1);
+  int cy = (int)luaL_checknumber(L, 2);
+  int r = (int)luaL_checknumber(L, 3);
+  int c = (int)luaL_optnumber(L, 4, 0);
+  display_prepare_canvas();
+  Paint_DrawCircle(cx, cy, r, lua_color_to_paint(c), DRAW_FILL_EMPTY, DOT_PIXEL_1X1);
+  return 0;
+}
+
+// display.fill_circle(x, y, r, color)
+static int lua_display_fill_circle(lua_State* L) {
+  int cx = (int)luaL_checknumber(L, 1);
+  int cy = (int)luaL_checknumber(L, 2);
+  int r = (int)luaL_checknumber(L, 3);
+  int c = (int)luaL_optnumber(L, 4, 0);
+  display_prepare_canvas();
+  Paint_DrawCircle(cx, cy, r, lua_color_to_paint(c), DRAW_FILL_FULL, DOT_PIXEL_1X1);
+  return 0;
+}
+
+// display.text(x, y, str, size, color)
+// size: 1=Font8(5x8), 2=Font12(7x12), 3=Font16(11x16), 4=Font24(17x24)
+static int lua_display_text(lua_State* L) {
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
+  const char* str = luaL_checkstring(L, 3);
+  int size = (int)luaL_optnumber(L, 4, 2);
+  int c = (int)luaL_optnumber(L, 5, 0);
+
+  display_prepare_canvas();
+
+  sFONT* font = &Font12;
+  int cn_cell = 16;
+  switch (size) {
+    case 1: font = &Font8;  cn_cell = 16; break;
+    case 2: font = &Font12; cn_cell = 16; break;
+    case 3: font = &Font16; cn_cell = 16; break;
+    case 4: font = &Font24; cn_cell = 24; break;
+    default: font = &Font12; cn_cell = 16; break;
+  }
+
+  // 检测是否包含多字节（中文）字符
+  bool has_utf8 = false;
+  for (const char* p = str; *p; p++) {
+    if ((uint8_t)*p >= 0x80) {
+      has_utf8 = true;
+      break;
+    }
+  }
+
+  if (has_utf8) {
+    gb_map_load();
+    draw_utf8_text(x, y, str, cn_cell, font, lua_color_to_paint(c));
+  } else {
+    Paint_DrawString_EN(x, y, str, font, lua_color_to_paint(c), WHITE0);
+  }
+  return 0;
+}
+
+// display.show() -> 刷新到墨水屏（约12秒）
+static int lua_display_show(lua_State* L) {
+  display_prepare_canvas();
+  EPD_init_Fast2();
+  PIC_display(BlackImage);
+  EPD_sleep();
+  return 0;
+}
+
+// ============================================================================
+// GB2312 中文字库（SPIFFS: /spiffs/fonts/）
+// ============================================================================
+
+static const char* GB_FONT_16_PATH = "/spiffs/fonts/gb2312_16.bin";
+static const char* GB_FONT_24_PATH = "/spiffs/fonts/gb2312_24.bin";
+static const char* GB_MAP_PATH = "/spiffs/fonts/gb2312_map.bin";
+
+// 映射表缓存：[unicode, gbcode] 交替，按 unicode 升序（小端）
+static uint16_t* s_gb_map = nullptr;
+static uint32_t s_gb_map_count = 0;
+static bool s_gb_map_loaded = false;
+
+static bool gb_map_load() {
+  if (s_gb_map_loaded) {
+    return s_gb_map != nullptr;
+  }
+  s_gb_map_loaded = true;
+
+  FILE* fp = fopen(GB_MAP_PATH, "rb");
+  if (!fp) {
+    Serial.println("Lua: GB2312 map not found");
+    return false;
+  }
+
+  uint32_t count = 0;
+  if (fread(&count, 4, 1, fp) != 1 || count == 0 || count > 20000) {
+    fclose(fp);
+    return false;
+  }
+
+  uint16_t* buf = (uint16_t*)malloc((size_t)count * 4);
+  if (!buf) {
+    fclose(fp);
+    return false;
+  }
+  if (fread(buf, 4, count, fp) != count) {
+    free(buf);
+    fclose(fp);
+    return false;
+  }
+  fclose(fp);
+
+  s_gb_map = buf;
+  s_gb_map_count = count;
+  Serial.printf("Lua: GB2312 map loaded (%u entries)\n", count);
+  return true;
+}
+
+// 二分查找 unicode -> gbcode（0 表示未收录）
+static uint16_t gb_map_lookup(uint32_t unicode) {
+  if (!s_gb_map) {
+    return 0;
+  }
+  int32_t lo = 0, hi = (int32_t)s_gb_map_count - 1;
+  while (lo <= hi) {
+    int32_t mid = (lo + hi) / 2;
+    uint16_t u = s_gb_map[mid * 2];
+    if (u == unicode) {
+      return s_gb_map[mid * 2 + 1];
+    }
+    if (u < unicode) {
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return 0;
+}
+
+// UTF-8 解码，返回 Unicode 码点（BMP）
+static uint32_t utf8_decode(const char* s, int* len) {
+  uint8_t b0 = (uint8_t)s[0];
+  if (b0 < 0x80) {
+    *len = 1;
+    return b0;
+  }
+  if ((b0 & 0xE0) == 0xC0 && s[1] != '\0') {
+    *len = 2;
+    return ((b0 & 0x1F) << 6) | ((uint8_t)s[1] & 0x3F);
+  }
+  if ((b0 & 0xF0) == 0xE0 && s[1] != '\0' && s[2] != '\0') {
+    *len = 3;
+    return ((b0 & 0x0F) << 12) | (((uint8_t)s[1] & 0x3F) << 6) | ((uint8_t)s[2] & 0x3F);
+  }
+  *len = 1;
+  return b0;
+}
+
+// 从字库文件读取并绘制一个 GB2312 字形到 (x, y)
+static void gb_glyph_draw(FILE* fp, uint16_t gbcode, int x, int y, int cell, UWORD color) {
+  int hi = gbcode >> 8;
+  int lo = gbcode & 0xFF;
+  int bytes_per_row = cell / 8;
+  long offset = ((long)(hi - 0xA1) * 94 + (lo - 0xA1)) * bytes_per_row * cell;
+
+  if (fseek(fp, offset, SEEK_SET) != 0) {
+    return;
+  }
+
+  uint8_t row[3];
+  for (int r = 0; r < cell; r++) {
+    if (fread(row, 1, bytes_per_row, fp) != (size_t)bytes_per_row) {
+      return;
+    }
+    for (int c = 0; c < cell; c++) {
+      if (row[c / 8] & (0x80 >> (c % 8))) {
+        Paint_SetPixel(x + c, y + r, color);
+      }
+    }
+  }
+}
+
+// 绘制 UTF-8 文本（ASCII + 中文混排）
+static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* ascii_font, UWORD color) {
+  FILE* fp = nullptr;
+  const char* p = str;
+  int cx = x;
+
+  while (*p) {
+    int len;
+    uint32_t uni = utf8_decode(p, &len);
+
+    if (uni < 0x80) {
+      Paint_DrawChar(cx, y, (char)uni, ascii_font, color, WHITE0);
+      cx += ascii_font->Width;
+    } else {
+      if (!fp) {
+        fp = fopen(cn_cell == 24 ? GB_FONT_24_PATH : GB_FONT_16_PATH, "rb");
+        if (!fp) {
+          Paint_DrawChar(cx, y, '?', ascii_font, color, WHITE0);
+          cx += ascii_font->Width;
+          p += len;
+          continue;
+        }
+      }
+
+      uint16_t gb = gb_map_lookup(uni);
+      if (gb == 0) {
+        // 字库未收录，回退画 '?'
+        Paint_DrawChar(cx, y, '?', ascii_font, color, WHITE0);
+      } else {
+        gb_glyph_draw(fp, gb, cx, y, cn_cell, color);
+      }
+      cx += cn_cell;
+    }
+
+    p += len;
+  }
+
+  if (fp) {
+    fclose(fp);
+  }
+}
+
+static const luaL_Reg display_lib[] = {
+  {"clear", lua_display_clear},
+  {"pixel", lua_display_pixel},
+  {"line", lua_display_line},
+  {"rect", lua_display_rect},
+  {"fill_rect", lua_display_fill_rect},
+  {"circle", lua_display_circle},
+  {"fill_circle", lua_display_fill_circle},
+  {"text", lua_display_text},
+  {"show", lua_display_show},
   {NULL, NULL}
 };
 
@@ -246,6 +581,17 @@ void register_lua_hardware_apis(lua_State* L) {
   // Register time library
   luaL_newlib(L, time_lib);
   lua_setglobal(L, "time");
+
+  // Register display library
+  luaL_newlib(L, display_lib);
+  lua_setglobal(L, "display");
+
+  // Register display size constants
+  lua_pushnumber(L, EPD_WIDTH);
+  lua_setglobal(L, "WIDTH");
+
+  lua_pushnumber(L, EPD_HEIGHT);
+  lua_setglobal(L, "HEIGHT");
 
   // Add clamp to math library
   lua_getglobal(L, "math");
@@ -376,7 +722,7 @@ void inject_lua_config_table(lua_State* L, const char* module_id, const char* sc
             int int_value = prefs.getInt(key.c_str(), 0);
             if (int_value != 0) {
               lua_pushstring(L, key.c_str());
-              lua_pushnumber(L, int_value);
+              lua_pushinteger(L, int_value);
               lua_settable(L, -3);
             }
           }
@@ -387,6 +733,14 @@ void inject_lua_config_table(lua_State* L, const char* module_id, const char* sc
             lua_pushstring(L, key.c_str());
             lua_pushstring(L, string_value.c_str());
             lua_settable(L, -3);
+          } else if (type == "select") {
+            // select 也可能保存为整数（如月份/日期选项），回退读取整数
+            int int_value = prefs.getInt(key.c_str(), 0);
+            if (int_value != 0) {
+              lua_pushstring(L, key.c_str());
+              lua_pushinteger(L, int_value);
+              lua_settable(L, -3);
+            }
           }
         } else if (type == "switch") {
           // 布尔类型 - key 存在时读取实际值

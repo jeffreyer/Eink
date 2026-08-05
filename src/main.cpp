@@ -313,6 +313,9 @@ void loop() {
     return;
   }
 
+  // 若当前模块配置在 BLE 会话中被修改，重新加载模块使新配置生效
+  module_registry_update();
+
   const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
   if (module && module->loop) {
     module->loop();
