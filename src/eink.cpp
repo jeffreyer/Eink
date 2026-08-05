@@ -14,7 +14,7 @@ int init_eink(){
     pinMode(5, OUTPUT); //CS   
     //SPI
     SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0)); 
-    SPI.begin(6,-1,7,-1);
+    SPI.begin(6,-1,7,5);
     // SPI.begin ();  
     return 0;
 }
