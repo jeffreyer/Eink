@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include "eink.h"
+#include "Display_EPD_W21.h"
 
 void check_cmd(){
   if (Serial.available() > 0) {
@@ -198,6 +199,11 @@ void check_cmd(){
       // 清除蓝牙绑定状态
       ble_config_unbind();
       Serial.printf("[BLE] Device unbound, password regenerated");
+    }
+    else if (command.startsWith("white")) {
+      EPD_init_Fast2();
+      Display_All_White();
+      EPD_sleep();
     }
     else if (command.startsWith("nvs")) {
       // 读取 NVS 中所有 key 和值
