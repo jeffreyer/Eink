@@ -515,6 +515,12 @@ cd /d/Projects/Eink
 /d/.platformio/penv/Scripts/platformio.exe run
 ```
 
+**Flash 分区表** (`partitions.csv`，4MB Flash):
+- `nvs`(20KB) + `otadata`(8KB) + `app0`(1.125MB, ota_0) + `modules`(2.8125MB, SPIFFS)
+- 已移除 `app1`/OTA 分区（固件 OTA 逻辑已全部注释），把空余空间全部并入 `modules` 分区
+- ⚠️ 刷入新分区表后 SPIFFS 容量变化会触发格式化，需重新 `uploadfs` 上传 `data/` 目录
+  （Lua 模块、字体、配置），否则设备上旧数据失效
+
 **常见错误**:
 1. **undefined reference to 'enter_deep_sleep()'**
    - 原因: 缺少头文件
