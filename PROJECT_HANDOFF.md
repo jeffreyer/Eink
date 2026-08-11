@@ -103,7 +103,7 @@ include/
 └── GUI_Paint.h
 
 data/
-├── gallery.cfg           # 相册配置文件（cycle_interval, rotation）
+├── gallery.cfg           # 相册配置定义（display_mode, cycle_interval；rotation 已移至模块页全局配置）
 ├── countdown.lua         # 纪念日倒计时模块
 └── fonts/                # GB2312 全量点阵字库（16/24px + 映射表）
 
@@ -358,6 +358,26 @@ wx.onBLECharacteristicValueChange((res) => {
 
 ---
 
+### 问题4: 相册图片下载导致设备崩溃（Load access fault）
+
+**现象**: 小程序点击相册图片占位符下载图片时，设备端重启，
+日志停在 `Sending image data via set_status (auto-chunked)...`。
+
+**根因**: `gallery_get` 先把 28,800 字节图片拼成 38,400 字符的 Base64 String，
+再拼成完整响应 String（峰值约 3×38KB 临时内存），把 ESP32-C3 堆耗尽，
+`set_status` 分块时分配 packet 失败 → 空指针 → Load access fault。
+
+**解决方案**: 新增 `send_gallery_image_chunked()` 流式发送——边读文件边
+Base64 编码，按 120 字符累积直接 notify 分块，全程不构建大 String
+（峰值仅约几百字节）。块格式与 `set_status` 一致，前端无需改动。
+BLE 通知做了节流与退避（`notify()` 失败延时重试、成功后 2ms 间隔），
+避免连发 300+ 个通知把 NimBLE 队列塞满导致丢包（表现为进度卡在 30-40%
+后超时）。小程序端 `getImageFromDevice` 超时同步放宽到 60 秒。
+
+**修改文件**: `src/ble_config.cpp`、`utils/bluetooth.js`
+
+---
+
 ## 功能特性
 
 ### 1. 设备端特性
@@ -366,15 +386,17 @@ wx.onBLECharacteristicValueChange((res) => {
 - 图片存储：SPIFFS文件系统
 - 支持格式：4色屏 2bit（200x200，10,000字节）；6色屏 4bit（240x240，28,800字节）
 - 上传：分块上传，每块256字节
-- 旋转：0°/90°/180°/270° 四个方向
+- 旋转：0°/90°/180°/270° 四个方向（**全局配置**，位于模块页“显示方向”，
+  通过 `gallery_rotation` 键保存，设备状态含 `rotation` 字段）
+  - 相册：显示时旋转帧缓冲（`rotate_image` / `rotate_image6`）
+  - Lua 模块（倒计时等）：`display_prepare_canvas()` 统一 `Paint_SetRotate`，
+    重绘（退出 BLE / 刷新显示）后整屏生效
 - 循环播放：可配置间隔（1分钟~24小时）
 - 限制：仅MiniEink设备支持
 
 **配置项** (`data/gallery.cfg`):
-```
-cycle_interval=300    # 循环间隔（秒）
-rotation=0            # 显示旋转（0/90/180/270）
-```
+JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（循环间隔）。
+显示方向不再出现在相册配置页，改由模块页全局设置。
 
 #### 休眠管理 (sleep_manager.cpp)
 - 深度休眠：定时器唤醒

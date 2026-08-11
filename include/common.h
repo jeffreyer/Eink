@@ -28,8 +28,6 @@
 
 extern int32_t page_index,subpage_index;
 
-extern uint8_t brightness_max;
-extern uint8_t user_brightness_max;
 extern bool is_chk_bat;
 
 int load_config(String key);

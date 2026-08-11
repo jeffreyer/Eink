@@ -223,7 +223,6 @@ void check_cmd(){
       if (prefs.begin("bottle", true)) {
         Serial.printf("\n[Namespace: bottle]");
         Serial.printf("  page_index = %d", prefs.getInt("page_index", -1));
-        Serial.printf("  brightness = %d", prefs.getInt("brightness", -1));
         Serial.printf("  sleep_sec = %d", prefs.getInt("sleep_sec", -1));
         Serial.printf("  i2s_mic = %d", prefs.getInt("i2s_mic", -1));
         Serial.printf("  led = %d", prefs.getInt("led", -1));

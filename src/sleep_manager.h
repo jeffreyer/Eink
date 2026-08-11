@@ -7,7 +7,6 @@ extern "C" {
 #endif
 
 #define IDLE_TIMEOUT_DEFAULT 60
-#define BRIGHTNESS_FADE_STEP 1
 
 extern uint32_t s_idle_timeout_ms;
 

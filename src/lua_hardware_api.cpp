@@ -226,6 +226,8 @@ static void display_prepare_canvas() {
   Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, WHITE0);
   Paint_SetScale(4);
 #endif
+  // 全局显示方向（模块页“显示方向”）：对 Lua 绘制模块统一生效
+  Paint_SetRotate((UWORD)load_config_ns("gallery", "rotation"));
   Paint_SelectImage(BlackImage);
 }
 

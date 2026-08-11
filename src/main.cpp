@@ -37,7 +37,6 @@ void main_load_config(){
   Preferences prefs;
   prefs.begin("bottle", true);
   page_index = prefs.getInt("page_index");
-  user_brightness_max = prefs.getInt("brightness", user_brightness_max);
   s_idle_timeout_ms = prefs.getInt("sleep_sec",IDLE_TIMEOUT_DEFAULT)*1000;
   is_chk_bat = prefs.getInt("chk_bat",0);
   prefs.end();
@@ -47,7 +46,6 @@ void main_save_config(){
   Preferences prefs;
   prefs.begin("bottle", false);
   prefs.putInt("page_index",page_index);
-  prefs.putInt("brightness",user_brightness_max);
   prefs.end();
 
   // const module_descriptor_t* module = module_registry_get((uint8_t)page_index);

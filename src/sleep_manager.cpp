@@ -8,9 +8,6 @@
 #include "driver/rtc_io.h"
 #include "gallery.h"
 
-uint8_t brightness_max=10;
-uint8_t user_brightness_max=10;
-
 uint32_t s_idle_timeout_ms = IDLE_TIMEOUT_DEFAULT*1000;
 static bool s_initialized = false;
 static uint32_t last_active = 0;

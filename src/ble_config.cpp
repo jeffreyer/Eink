@@ -205,8 +205,8 @@ static String status_json(bool include_modules = false) {
     s += "\"ok\":true";
     s += ",\"model\":\"" + String(DEVICE_MODEL) + "\"";
     s += ",\"ink\":" + String(INK_COLORS);
+    s += ",\"rotation\":" + String(load_config_ns("gallery", "rotation"));
     s += ",\"mac\":\"" + mac + "\"";
-    s += ",\"brightness\":" + String(brightness_max);
     s += ",\"sleep_sec\":" + String(sleep_sec);
     s += ",\"page\":" + String(page_index);
     s += ",\"subpage\":" + String(subpage_index);
@@ -315,6 +315,83 @@ static void draw_ble_icon(void) {
 
 }
 
+// ====================== 相册图片分块发送（流式，避免大 String 耗尽堆） ======================
+// 直接边读文件边 Base64 编码并按块 notify，全程不构建完整 JSON String。
+// 块格式与 set_status 一致：{"chunk":N,"total":T,"data":"<原始JSON切片>"}
+static void send_gallery_image_chunked(FILE* file, size_t filesize) {
+    if (!s_status_char) return;
+
+    static const char base64_chars[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    // JSON: {"image_data":"<base64>"} → 头 15 字符 + base64 + 尾部 2 字符
+    const size_t header_len = 15;
+    const size_t json_total = header_len + ((filesize + 2) / 3) * 4 + 2;
+    const int chunk_size = 200;  // 每块原始 JSON 字符数（包体 ≤ 253 字节，适配 MTU 256）
+
+    size_t total_chunks = (json_total + chunk_size - 1) / chunk_size;
+    size_t chunk_index = 0;
+    String chunk = "";
+    chunk.reserve(chunk_size + 8);
+
+    auto flush_chunk = [&]() {
+        if (chunk.length() == 0) return;
+        String packet = "{\"chunk\":" + String((unsigned)chunk_index) +
+                        ",\"total\":" + String((unsigned)total_chunks) +
+                        ",\"data\":\"";
+        for (int j = 0; j < (int)chunk.length(); j++) {
+            char c = chunk[j];
+            if (c == '"' || c == '\\') packet += '\\';
+            packet += c;
+        }
+        packet += "\"}";
+        s_status_char->setValue(packet.c_str());
+        if (s_client_connected) {
+            // 通知队列可能积压：持续退避重试直到发送成功或客户端断开，
+            // 避免跳过导致前端缺块（表现为进度卡住后超时）
+            int attempts = 0;
+            while (!s_status_char->notify() && s_client_connected && attempts < 500) {
+                attempts++;
+                delay(20);
+            }
+            // 限速发送：手机端 BLE 接收缓冲有限，连发过快会丢尾部通知
+            // （表现为进度瞬间跳到 ~90% 后卡住超时）
+            delay(20);
+        }
+        chunk_index++;
+        chunk = "";
+    };
+
+    auto append_char = [&](char c) {
+        if ((int)chunk.length() >= chunk_size) {
+            flush_chunk();
+        }
+        chunk += c;
+    };
+
+    // 头部 {"image_data":"
+    const char header[] = "{\"image_data\":\"";
+    for (int i = 0; i < (int)header_len; i++) append_char(header[i]);
+
+    // Base64 主体（边读文件边编码）
+    uint8_t b[3];
+    size_t got;
+    while ((got = fread(b, 1, 3, file)) > 0) {
+        uint32_t triple = (uint32_t)b[0] << 16;
+        if (got > 1) triple |= (uint32_t)b[1] << 8;
+        if (got > 2) triple |= (uint32_t)b[2];
+        append_char(base64_chars[(triple >> 18) & 0x3F]);
+        append_char(base64_chars[(triple >> 12) & 0x3F]);
+        append_char(got > 1 ? base64_chars[(triple >> 6) & 0x3F] : '=');
+        append_char(got > 2 ? base64_chars[triple & 0x3F] : '=');
+    }
+
+    // 尾部 "}
+    append_char('"');
+    append_char('}');
+    flush_chunk();
+}
+
 static void apply_command(const String& cmd) {
     int value = 0;
 
@@ -328,8 +405,8 @@ static void apply_command(const String& cmd) {
         status += "\"ok\":true,";
         status += "\"model\":\"" + String(DEVICE_MODEL) + "\",";
         status += "\"ink\":" + String(INK_COLORS) + ",";
+        status += "\"rotation\":" + String(load_config_ns("gallery", "rotation")) + ",";
         status += "\"mac\":\"" + mac + "\",";
-        status += "\"brightness\":" + String(brightness_max) + ",";
         status += "\"sleep_sec\":" + String(sleep_sec) + ",";
         status += "\"page\":" + String(page_index) + ",";
         status += "\"subpage\":" + String(subpage_index) + ",";
@@ -763,50 +840,9 @@ static void apply_command(const String& cmd) {
 
             Serial.printf("File size: %d bytes\n", filesize);
 
-            // 读取文件内容
-            uint8_t* buffer = (uint8_t*)malloc(filesize);
-            if (!buffer) {
-                fclose(file);
-                set_status("{\"ok\":false,\"error\":\"Memory allocation failed\"}");
-                return;
-            }
-
-            size_t read_size = fread(buffer, 1, filesize, file);
+            Serial.println("Sending image data (streaming base64 chunks)...");
+            send_gallery_image_chunked(file, filesize);
             fclose(file);
-
-            if (read_size != filesize) {
-                free(buffer);
-                Serial.println("Read failed");
-                set_status("{\"ok\":false,\"error\":\"Read failed\"}");
-                return;
-            }
-
-            Serial.println("File read successfully, encoding to Base64...");
-
-            // 直接Base64编码原始图像数据
-            const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            String base64Data = "";
-
-            for (size_t i = 0; i < filesize; i += 3) {
-                uint32_t triple = (i < filesize ? buffer[i] << 16 : 0)
-                                | (i + 1 < filesize ? buffer[i + 1] << 8 : 0)
-                                | (i + 2 < filesize ? buffer[i + 2] : 0);
-
-                base64Data += base64_chars[(triple >> 18) & 0x3F];
-                base64Data += base64_chars[(triple >> 12) & 0x3F];
-                base64Data += (i + 1 < filesize) ? base64_chars[(triple >> 6) & 0x3F] : '=';
-                base64Data += (i + 2 < filesize) ? base64_chars[triple & 0x3F] : '=';
-            }
-
-            free(buffer);
-
-            Serial.printf("Base64 encoded, length: %d\n", base64Data.length());
-
-            // 直接发送完整数据，让set_status自动分块
-            String response = "{\"image_data\":\"" + base64Data + "\"}";
-
-            Serial.println("Sending image data via set_status (auto-chunked)...");
-            set_status(response);
             Serial.println("Image data sent successfully");
 
             return;
@@ -814,14 +850,6 @@ static void apply_command(const String& cmd) {
     }
 
     // ============= 相册功能命令处理结束 =============
-
-
-    if (extract_int(cmd, "brightness", &value)) {
-        value = constrain(value, 0, 255);
-        user_brightness_max = (uint8_t)value;
-
-        save_config("brightness", user_brightness_max);
-    }
 
     if (extract_int(cmd, "sleep_sec", &value)) {
         value = max(value, 0);
