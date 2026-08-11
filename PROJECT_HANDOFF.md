@@ -5,11 +5,71 @@
 这是一个基于ESP32-C3的墨水屏设备项目，包含设备端固件和微信小程序前端。设备通过BLE与小程序通信，支持模块化配置和相册管理功能。
 
 **设备型号**: MiniEink (Adafruit QT Py ESP32-C3)  
-**显示屏**: 200x200 4色墨水屏（黑、白、黄、红）  
-**刷新时间**: 约12秒  
+**显示屏**: 两个版本
+- 4色屏（默认）：200x200（黑、白、黄、红）
+- 6色屏（`INK6` 宏）：240x240 JD7601（黑、白、黄、红、蓝、绿），1.54寸
+**刷新时间**: 4色约12秒；6色约30-40秒（驱动内 BUSY 超时上限 40 秒）  
 **通信方式**: BLE (NimBLE)  
 **开发环境**: PlatformIO + Arduino Framework  
 **前端**: 微信小程序
+
+---
+
+## 6色屏适配（当前主线）
+
+新版硬件：6色 1.54寸 240x240 墨水屏（JD7601 驱动，4bpp 打包，每字节 2 像素），
+并新增 KEY_UP / KEY_DOWN 两个实体按键。固件通过 `include/common.h` 中的 `#define INK6`
+区分 6 色 / 4 色编译模式。
+
+### 引脚（6色屏）
+
+| 信号 | GPIO |
+|------|------|
+| KEY_UP | 1 |
+| KEY_DOWN | 2 |
+| BLE_LIGHT | 20 |
+| EPD BUSY | 10 |
+| EPD RST | 3 |
+| EPD DC | 4 |
+| EPD CS | 5 |
+| EPD SCK | 6 |
+| EPD MOSI | 7 |
+
+### 颜色编码（设备端，与 JD7601 面板码一致）
+
+| 颜色 | 半字节(nibble) | 字节(2像素) |
+|------|------|------|
+| 黑 | 0x0 | 0x00 |
+| 白 | 0x1 | 0x11 |
+| 黄 | 0x2 | 0x22 |
+| 红 | 0x3 | 0x33 |
+| 蓝 | 0x5 | 0x55 |
+| 绿 | 0x6 | 0x66 |
+
+### 绘制与刷新链路
+
+- 画布：`BlackImage[28800]`（240x240，4bpp），由 `eink6.cpp` 定义
+- 绘制：复用 `GUI_Paint` 的 `Paint_SetScale(7)`（4bpp，2像素/字节，高位在前），
+  与 JD7601 帧格式逐字节一致，`lua_hardware_api.cpp` 在 `INK6` 下自动切换
+- 刷新：`display.show()` → `epdDisplayImage()`（写帧 0x10 → 刷新 0x12 → 休眠 0x07）
+- 4色屏代码在 `INK6` 下通过 `#ifndef INK6` 整体跳过（`eink.cpp`）
+
+### Lua 颜色值
+
+`0=黑, 1=白, 2=黄, 3=红, 4=蓝, 5=绿`（4色屏仅支持 0-3）。
+`WIDTH` / `HEIGHT` 全局量由固件注册，`INK6` 下自动为 240。
+
+### 按键功能（`main.cpp check_btn`）
+
+| 按键 | 短按 | 长按(3秒) |
+|------|------|------|
+| KEY_UP | 上一页（subpage-1，触发模块重绘） | 开关 BLE 配置 |
+| KEY_DOWN | 下一页（subpage+1，触发模块重绘） | 进入深度休眠 |
+
+### BLE 状态字段
+
+`get_status` 新增 `"ink": 6`（4色屏为 4），小程序据此选择图片格式
+（6色：240x240 4bpp / 28,800 字节；4色：200x200 2bpp / 10,000 字节）。
 
 ---
 
@@ -21,11 +81,15 @@
 src/
 ├── main.cpp              # 主程序入口，loop和setup
 ├── ble_config.cpp        # BLE通信核心（NimBLE），包含分块传输
-├── cmd_handler.cpp       # 命令处理器，解析JSON命令
-├── module_registry.cpp   # 模块注册表
-├── sleep_manager.cpp     # 休眠管理（深度睡眠）
-├── gallery.cpp           # 相册功能（仅MiniEink，包含旋转功能）
-└── display/              # 显示驱动相关
+├── cmd_handler.cpp       # 串口命令处理器（含 white/dis 调试命令）
+├── module_registry.cpp   # 模块注册表（含 Lua 动态模块加载）
+├── sleep_manager.cpp     # 休眠管理（深度睡眠，KEY_UP/KEY_DOWN 唤醒）
+├── gallery.cpp           # 相册功能（含 2bpp/4bpp 旋转）
+├── eink.cpp              # 4色屏驱动封装（INK6 下不编译）
+├── eink6.cpp             # 6色屏 JD7601 驱动 + 6色画布 BlackImage
+├── lua_hardware_api.cpp  # Lua display API（绘制/中文渲染/刷新）
+├── Display_EPD_W21.cpp   # 4色屏底层驱动
+└── GUI/                  # GUI_Paint 绘制库（Scale 4=2bpp, Scale 7=4bpp）
 
 include/
 ├── ble_config.h          # BLE接口定义
@@ -33,10 +97,15 @@ include/
 ├── module_registry.h
 ├── sleep_manager.h
 ├── gallery.h
-└── display/
+├── eink.h                # 4色屏参数（200x200）
+├── eink6.h               # 6色屏参数（240x240）+ 颜色常量
+├── image.h               # 6色测试图（调试用）
+└── GUI_Paint.h
 
 data/
-└── gallery.cfg           # 相册配置文件（cycle_interval, rotation）
+├── gallery.cfg           # 相册配置文件（cycle_interval, rotation）
+├── countdown.lua         # 纪念日倒计时模块
+└── fonts/                # GB2312 全量点阵字库（16/24px + 映射表）
 
 platformio.ini            # PlatformIO配置
 ```
@@ -48,12 +117,14 @@ pages/
 ├── modules/              # 模块列表页（首页TabBar）
 ├── module-config/        # 模块配置详情页
 ├── gallery/              # 相册管理页（仅MiniEink设备，TabBar）
+├── image-editor/         # 图片编辑页（按设备 ink 字段选 4色/6色格式）
 ├── device-connect/       # 设备扫描连接页
 ├── market/               # 模块市场页（TabBar）
 └── profile/              # 个人中心页（TabBar）
 
 utils/
-└── bluetooth.js          # ⭐ BLE通信核心，统一管理所有BLE交互
+├── bluetooth.js          # ⭐ BLE通信核心，统一管理所有BLE交互
+└── imageProcessor.js     # 图片处理工具（4色/6色量化与打包）
 
 app.js                    # 全局应用配置
 app.json                  # 小程序配置（TabBar等）
@@ -70,8 +141,9 @@ app.json                  # 小程序配置（TabBar等）
 | 平台 | PlatformIO |
 | 框架 | Arduino (ESP32 5.5.4) |
 | BLE库 | NimBLE-Arduino 2.5.0 |
-| 显示 | FastLED 3.10.3 |
-| 编译命令 | `platformio.exe run`（⚠️ 仅编译，不上传） |
+| 显示 | GUI_Paint 绘制库；4色屏 Display_EPD_W21 / 6色屏 eink6 (JD7601) |
+| Lua | lua-5.4.7（动态模块脚本） |
+| 编译命令 | `d:\.platformio\penv\Scripts\platformio.exe run`（⚠️ 仅编译，不上传） |
 
 ### 前端
 
@@ -105,7 +177,7 @@ Status Char:   8C0B8A12-7E3D-4DF7-9A2A-1D8D46F8B100 (READ | NOTIFY)
 
 // 相册相关（仅MiniEink）
 {"gallery_list": true}             // 获取图片列表
-{"gallery_upload_start": true, "filename": "...", "size": 5000}  // 开始上传
+{"gallery_upload_start": true, "filename": "...", "size": 28800} // 开始上传（6色=28800，4色=10000）
 {"gallery_upload_chunk": true, "data": "base64..."}              // 上传数据块
 {"gallery_upload_complete": true}                                // 上传完成
 {"gallery_get": true, "filename": "..."}                         // 获取图片
@@ -115,6 +187,8 @@ Status Char:   8C0B8A12-7E3D-4DF7-9A2A-1D8D46F8B100 (READ | NOTIFY)
 // 系统相关
 {"get_status": 0}                  // 获取状态（支持分页）
 ```
+
+`get_status` 响应包含 `"ink"` 字段（4 或 6），小程序端据此区分图片格式与编辑尺寸。
 
 #### 设备 → 小程序 (通过 Status Characteristic)
 
@@ -290,7 +364,7 @@ wx.onBLECharacteristicValueChange((res) => {
 
 #### 相册功能 (gallery.cpp)
 - 图片存储：SPIFFS文件系统
-- 支持格式：2-bit灰度图（200x200）
+- 支持格式：4色屏 2bit（200x200，10,000字节）；6色屏 4bit（240x240，28,800字节）
 - 上传：分块上传，每块256字节
 - 旋转：0°/90°/180°/270° 四个方向
 - 循环播放：可配置间隔（1分钟~24小时）
@@ -310,7 +384,7 @@ rotation=0            # 显示旋转（0/90/180/270）
 ### 2. 小程序特性
 
 #### 相册管理 (gallery页面)
-- ✅ 图片上传：选择相册/拍照，自动转换为2-bit灰度
+- ✅ 图片上传：选择相册/拍照，按设备 `ink` 自动转换为 4色2bit 或 6色4bit（含蓝/绿）
 - ✅ 图片预览：点击占位符从设备获取，支持进度显示
 - ✅ 批量删除：长按进入批量模式
 - ✅ 显示到墨水屏：一键推送显示
@@ -358,7 +432,7 @@ grep -rn "onBLECharacteristicValueChange" pages/ --include="*.js"
 ```bash
 # ✅ 正确 - 仅编译
 cd /d/Projects/Eink
-/c/Users/jeff/.platformio/penv/Scripts/platformio.exe run
+/d/.platformio/penv/Scripts/platformio.exe run
 
 # ❌ 错误 - 不要上传
 platformio.exe run --target upload
@@ -410,13 +484,13 @@ if (!manifest.id || !manifest.configs) {
 ### 设备端编译
 
 **环境**:
-- PlatformIO: `C:\Users\jeff\.platformio\penv\Scripts\platformio.exe`
+- PlatformIO: `D:\.platformio\penv\Scripts\platformio.exe`
 - 工作目录: `d:\Projects\Eink`
 
 **命令**:
 ```bash
 cd /d/Projects/Eink
-/c/Users/jeff/.platformio/penv/Scripts/platformio.exe run
+/d/.platformio/penv/Scripts/platformio.exe run
 ```
 
 **常见错误**:

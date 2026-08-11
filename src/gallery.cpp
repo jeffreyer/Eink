@@ -1,8 +1,12 @@
 #include "gallery.h"
 #include "common.h"
+#ifdef INK6
+#include "eink6.h"
+#else
 #include "Display_EPD_W21.h"
 #include "GUI_Paint.h"
 #include "eink.h"
+#endif
 #include <SPIFFS.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -11,8 +15,13 @@
 #include "ble_config.h"
 
 // 墨水屏尺寸定义
+#ifdef INK6
+#define EPD_WIDTH 240
+#define EPD_HEIGHT 240
+#else
 #define EPD_WIDTH 200
 #define EPD_HEIGHT 200
+#endif
 
 #define GALLERY_DIR "/spiffs/gallery"
 #define MAX_IMAGES 100
@@ -34,6 +43,66 @@ static unsigned long s_last_display_time = 0;  // 上次显示时间
 // 前置声明
 static bool gallery_display_by_index(int index);
 static void rotate_image(uint8_t* image, int width, int height, int degrees);
+
+#ifdef INK6
+// 旋转图像数据（4位色深位图格式，每字节2个像素，高位在前）
+static void rotate_image6(uint8_t* image, int width, int height, int degrees) {
+    if (degrees == 0) return;
+
+    int total_bytes = width * height / 2;
+
+    uint8_t* temp = (uint8_t*)malloc(total_bytes);
+    if (!temp) {
+        Serial.println("Gallery: Failed to allocate rotation buffer");
+        return;
+    }
+
+    memcpy(temp, image, total_bytes);
+    memset(image, 0, total_bytes);
+
+    // 辅助函数：获取像素值（4位）
+    auto get_pixel = [temp, width](int x, int y) -> uint8_t {
+        int pixel_index = y * width + x;
+        int byte_index = pixel_index / 2;
+        int nibble_offset = (1 - (pixel_index % 2)) * 4;  // 高位在前
+        return (temp[byte_index] >> nibble_offset) & 0x0F;
+    };
+
+    // 辅助函数：设置像素值（4位）
+    auto set_pixel = [image, width](int x, int y, uint8_t value) {
+        int pixel_index = y * width + x;
+        int byte_index = pixel_index / 2;
+        int nibble_offset = (1 - (pixel_index % 2)) * 4;  // 高位在前
+        image[byte_index] |= (value & 0x0F) << nibble_offset;
+    };
+
+    if (degrees == 90) {
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint8_t pixel = get_pixel(x, y);
+                set_pixel(height - 1 - y, x, pixel);
+            }
+        }
+    } else if (degrees == 180) {
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint8_t pixel = get_pixel(x, y);
+                set_pixel(width - 1 - x, height - 1 - y, pixel);
+            }
+        }
+    } else if (degrees == 270) {
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                uint8_t pixel = get_pixel(x, y);
+                set_pixel(y, width - 1 - x, pixel);
+            }
+        }
+    }
+
+    free(temp);
+    Serial.printf("Gallery: Image rotated %d degrees (4-bit format)\n", degrees);
+}
+#endif
 
 // 旋转图像数据（2位色深位图格式，每字节4个像素）
 static void rotate_image(uint8_t* image, int width, int height, int degrees) {
@@ -263,6 +332,13 @@ bool gallery_display_image(const char* filename) {
         s_rotation = load_config_ns("gallery", "rotation");
     }
 
+    #ifdef INK6
+    if (s_rotation != 0) {
+        rotate_image6(BlackImage, EPD_WIDTH, EPD_HEIGHT, s_rotation);
+    }
+    epdDisplayImage(BlackImage,sizeof(BlackImage));
+
+    #else
     // 应用旋转
     if (s_rotation != 0) {
         rotate_image(BlackImage, EPD_WIDTH, EPD_HEIGHT, s_rotation);
@@ -271,6 +347,7 @@ bool gallery_display_image(const char* filename) {
     EPD_init_Fast2();
     PIC_display(BlackImage);
     EPD_sleep();
+    #endif
 
     Serial.printf("Gallery: Displayed %s (rotation: %d deg)\n", filename, s_rotation);
     return true;

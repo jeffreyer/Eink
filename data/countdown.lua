@@ -4,7 +4,7 @@
 -- @description: 纪念日倒计时，可配置显示剩余天数或小时数
 -- @id: countdown
 
--- 屏幕尺寸由设备端注册: WIDTH=200, HEIGHT=200
+-- 屏幕尺寸由设备端注册（4色屏 200x200，6色屏 240x240）
 
 local last_update = 0
 local update_interval = 3600000  -- 默认 1 小时刷新一次

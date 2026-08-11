@@ -5,7 +5,7 @@
 //IO settings
 //SCK--GPIO23(SCLK)
 //SDIN---GPIO18(MOSI)
-#define isEPD_W21_BUSY digitalRead(2)  //BUSY
+#define isEPD_W21_BUSY digitalRead(10)  //BUSY
 #define EPD_W21_RST_0 digitalWrite(3,LOW)  //RES
 #define EPD_W21_RST_1 digitalWrite(3,HIGH)
 #define EPD_W21_DC_0  digitalWrite(4,LOW) //DC

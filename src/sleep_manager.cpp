@@ -21,15 +21,10 @@ void enter_deep_sleep(void) {
 
   // pinMode(KEY_DOWN, INPUT);
 
-  // gpio_wakeup_enable(
-  //     (gpio_num_t)KEY_DOWN,
-  //     GPIO_INTR_LOW_LEVEL
-  // );
-
-  // esp_deep_sleep_enable_gpio_wakeup(
-  //     1ULL << KEY_DOWN,
-  //     ESP_GPIO_WAKEUP_GPIO_LOW
-  // );
+  gpio_wakeup_enable((gpio_num_t)KEY_UP,GPIO_INTR_LOW_LEVEL);
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << KEY_UP,ESP_GPIO_WAKEUP_GPIO_LOW);
+  gpio_wakeup_enable((gpio_num_t)KEY_DOWN,GPIO_INTR_LOW_LEVEL);
+  esp_deep_sleep_enable_gpio_wakeup(1ULL << KEY_DOWN,ESP_GPIO_WAKEUP_GPIO_LOW);
 
   if (gallery_get_display_mode()==1 && !gallery_get_images().empty()) {
     esp_sleep_enable_timer_wakeup(

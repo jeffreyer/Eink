@@ -1,3 +1,9 @@
+#include "common.h"
+
+#ifdef INK6
+// 6 色屏模式：4 色驱动与画布不再编译，BlackImage 由 eink6.cpp 提供
+#else
+
 #include <SPI.h>
 //EPD
 #include "Display_EPD_W21_spi.h"
@@ -122,3 +128,5 @@ int ink_draw_test(){
 #endif 
     return 0;
 }
+
+#endif // INK6

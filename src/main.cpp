@@ -11,9 +11,13 @@
 #include <Preferences.h>
 #include "battery.h"
 #include "cmd_handler.h"
-#include "eink.h"
 #include <SPIFFS.h>
+#ifdef INK6
+#include "eink6.h"
+#else
+#include "eink.h"
 #include "Display_EPD_W21.h"
+#endif
 
 // Button status enumeration for better code readability
 enum ButtonStatus {
@@ -91,7 +95,6 @@ bool app_set_module_enabled(int32_t page, bool enabled) {
     if (next && next->setup) {
       next->setup();
     }
-
   }
 
   return true;
@@ -154,8 +157,13 @@ void check_btn(){
       key_up_hold = 0;
       Serial.println("KEY_UP press detected");
 
-      // gui_draw();
-      ink_draw();
+      if (!ble_config_is_enabled()) {
+        if (subpage_index > 0) {
+          subpage_index--;
+          module_registry_refresh_current();
+          Serial.printf("Subpage: %d\n", subpage_index);
+        }
+      }
     }
     key_up_triggered=false;
   }
@@ -168,7 +176,7 @@ void check_btn(){
           key_down_triggered=true;
           key_down_hold = 0;
           Serial.println("KEY_DOWN long press detected");
-          // btn_status = BTN_SLEEP;
+          btn_status = BTN_SLEEP;
         }
       }
       else {
@@ -182,8 +190,11 @@ void check_btn(){
       key_down_hold = 0;
       Serial.println("KEY_DOWN press detected");
 
-      // enter_deep_sleep();
-      btn_status = BTN_CLICK;
+      if (!ble_config_is_enabled()) {
+        subpage_index++;
+        module_registry_refresh_current();
+        Serial.printf("Subpage: %d\n", subpage_index);
+      }
     }
     key_down_triggered=false;
   }
@@ -246,12 +257,18 @@ void setup() {
   Serial.begin(115200);
   pinMode(KEY_UP, INPUT);
   pinMode(KEY_DOWN, INPUT);
+  pinMode(BLE_LIGHT, OUTPUT);
+  digitalWrite(BLE_LIGHT, HIGH);
 
   SPIFFS.begin(true);
 
+  #ifdef INK6
+  init_eink6();
+  #else
   init_eink();
   EPD_init_Fast2();
   EPD_sleep();
+  #endif
 
   // // 6. 检查并执行自动 OTA 更新（如果有 firmware.bin）
   // if (auto_ota_check_and_update()) {
@@ -285,7 +302,6 @@ void setup() {
 
   sleep_manager_start();
 
-  btn_status = BTN_BLE;
 }
 
 void loop() {

@@ -6,15 +6,18 @@
 // 固件版本号
 #define FIRMWARE_VERSION "1.0.0"
 
-#define KEY_UP 8
-#define KEY_DOWN 9
+#define KEY_UP 1
+#define KEY_DOWN 2
+#define BLE_LIGHT 20
 
-//加速度计
-#define LIS3DH
+#define INK6
 
-//麦克风
-// #define MIC_I2S
-#define MIC_PDM
+// 墨水屏颜色数（供小程序端区分 4 色 / 6 色屏）
+#ifdef INK6
+#define INK_COLORS 6
+#else
+#define INK_COLORS 4
+#endif
 
 //蓝牙名称和设备型号
 #define BLE_DEVICE_NAME "MiniEink"

@@ -7,9 +7,13 @@
 #include "common.h"
 #include "sleep_manager.h"
 #include "time_calibration.h"
-#include "eink.h"
 #include "GUI_Paint.h"
+#ifdef INK6
+#include "eink6.h"
+#else
+#include "eink.h"
 #include "Display_EPD_W21.h"
+#endif
 
 extern "C" {
 #include "lua.h"
@@ -180,11 +184,22 @@ static const luaL_Reg time_lib[] = {
 static bool gb_map_load();
 static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* ascii_font, UWORD color);
 
-// 画布缓冲（定义于 eink.cpp）
+// 画布缓冲（4色屏定义于 eink.cpp，6色屏定义于 eink6.cpp）
 extern unsigned char BlackImage[ALLSCREEN_BYTES];
 
-// Lua 颜色值(0=黑,1=白,2=黄,3=红) -> 画布颜色值
+// Lua 颜色值(0=黑,1=白,2=黄,3=红,4=蓝,5=绿) -> 画布颜色值
 static UWORD lua_color_to_paint(int color) {
+#ifdef INK6
+  switch (color) {
+    case 1:  return NIBBLE_WHITE;   // 白
+    case 2:  return NIBBLE_YELLOW;  // 黄
+    case 3:  return NIBBLE_RED;     // 红
+    case 4:  return NIBBLE_BLUE;    // 蓝
+    case 5:  return NIBBLE_GREEN;   // 绿
+    case 0:
+    default: return NIBBLE_BLACK;   // 黑
+  }
+#else
   switch (color) {
     case 1:  return WHITE0;   // 白
     case 2:  return YELLOW0;  // 黄
@@ -192,18 +207,32 @@ static UWORD lua_color_to_paint(int color) {
     case 0:
     default: return BLACK0;   // 黑
   }
+#endif
 }
 
+// 画布“白底”颜色（4色屏为 2bit 白，6色屏为 4bit 白半字节）
+#ifdef INK6
+#define PAINT_BG_WHITE NIBBLE_WHITE
+#else
+#define PAINT_BG_WHITE WHITE0
+#endif
+
 static void display_prepare_canvas() {
+#ifdef INK6
+  // 6 色屏：240x240，4bpp（2 像素/字节），直接对应 JD7601 帧格式
+  Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, PAINT_BG_WHITE);
+  Paint_SetScale(7);
+#else
   Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, WHITE0);
   Paint_SetScale(4);
+#endif
   Paint_SelectImage(BlackImage);
 }
 
 // display.clear()
 static int lua_display_clear(lua_State* L) {
   display_prepare_canvas();
-  Paint_Clear(WHITE0);
+  Paint_Clear(PAINT_BG_WHITE);
   return 0;
 }
 
@@ -309,7 +338,7 @@ static int lua_display_text(lua_State* L) {
     gb_map_load();
     draw_utf8_text(x, y, str, cn_cell, font, lua_color_to_paint(c));
   } else {
-    Paint_DrawString_EN(x, y, str, font, lua_color_to_paint(c), WHITE0);
+    Paint_DrawString_EN(x, y, str, font, lua_color_to_paint(c), PAINT_BG_WHITE);
   }
   return 0;
 }
@@ -317,9 +346,13 @@ static int lua_display_text(lua_State* L) {
 // display.show() -> 刷新到墨水屏（约12秒）
 static int lua_display_show(lua_State* L) {
   display_prepare_canvas();
+#ifdef INK6
+  epdDisplayImage(BlackImage, ALLSCREEN_BYTES);
+#else
   EPD_init_Fast2();
   PIC_display(BlackImage);
   EPD_sleep();
+#endif
   return 0;
 }
 
@@ -447,13 +480,13 @@ static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* as
     uint32_t uni = utf8_decode(p, &len);
 
     if (uni < 0x80) {
-      Paint_DrawChar(cx, y, (char)uni, ascii_font, color, WHITE0);
+      Paint_DrawChar(cx, y, (char)uni, ascii_font, color, PAINT_BG_WHITE);
       cx += ascii_font->Width;
     } else {
       if (!fp) {
         fp = fopen(cn_cell == 24 ? GB_FONT_24_PATH : GB_FONT_16_PATH, "rb");
         if (!fp) {
-          Paint_DrawChar(cx, y, '?', ascii_font, color, WHITE0);
+          Paint_DrawChar(cx, y, '?', ascii_font, color, PAINT_BG_WHITE);
           cx += ascii_font->Width;
           p += len;
           continue;
@@ -463,7 +496,7 @@ static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* as
       uint16_t gb = gb_map_lookup(uni);
       if (gb == 0) {
         // 字库未收录，回退画 '?'
-        Paint_DrawChar(cx, y, '?', ascii_font, color, WHITE0);
+        Paint_DrawChar(cx, y, '?', ascii_font, color, PAINT_BG_WHITE);
       } else {
         gb_glyph_draw(fp, gb, cx, y, cn_cell, color);
       }

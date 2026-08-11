@@ -7,6 +7,11 @@
 #include "touch_icons.h"
 #include "time_calibration.h"
 #include "gallery.h"
+#ifdef INK6
+#include "eink6.h"
+#else
+#include "Display_EPD_W21.h"
+#endif
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <sys/time.h>
@@ -199,6 +204,7 @@ static String status_json(bool include_modules = false) {
     String s = "{";
     s += "\"ok\":true";
     s += ",\"model\":\"" + String(DEVICE_MODEL) + "\"";
+    s += ",\"ink\":" + String(INK_COLORS);
     s += ",\"mac\":\"" + mac + "\"";
     s += ",\"brightness\":" + String(brightness_max);
     s += ",\"sleep_sec\":" + String(sleep_sec);
@@ -321,6 +327,7 @@ static void apply_command(const String& cmd) {
         String mac = NimBLEDevice::getAddress().toString().c_str();
         status += "\"ok\":true,";
         status += "\"model\":\"" + String(DEVICE_MODEL) + "\",";
+        status += "\"ink\":" + String(INK_COLORS) + ",";
         status += "\"mac\":\"" + mac + "\",";
         status += "\"brightness\":" + String(brightness_max) + ",";
         status += "\"sleep_sec\":" + String(sleep_sec) + ",";
@@ -654,8 +661,8 @@ static void apply_command(const String& cmd) {
         int size = 0;
 
         if (extract_string(cmd, "filename", &filename) && extract_int(cmd, "size", &size)) {
-            // 验证尺寸（200*200*2bit = 10000字节）
-            if (size != 10000) {
+            // 验证尺寸（4色屏 200*200*2bit = 10000；6色屏 240*240*4bit = 28800）
+            if ((size_t)size != ALLSCREEN_BYTES) {
                 set_status("{\"ok\":false,\"error\":\"Invalid image size\"}");
                 return;
             }
@@ -706,7 +713,10 @@ static void apply_command(const String& cmd) {
     // 完成图片上传
     if (cmd.indexOf("\"gallery_upload_complete\"") >= 0 && s_gallery_upload_in_progress) {
         bool success = false;
-
+        Serial.printf("BLE: 完成图片上传，保存到相册，文件名: %s, 大小: %d, 已接收: %d\n",
+                      s_gallery_upload_filename.c_str(),
+                      s_gallery_upload_size,
+                      s_gallery_upload_received);
         if (s_gallery_upload_received == s_gallery_upload_size) {
             success = gallery_save_image(s_gallery_upload_filename.c_str(),
                                         s_gallery_upload_buffer,
@@ -773,7 +783,7 @@ static void apply_command(const String& cmd) {
 
             Serial.println("File read successfully, encoding to Base64...");
 
-            // 直接Base64编码原始2bit数据（10000字节）
+            // 直接Base64编码原始图像数据
             const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
             String base64Data = "";
 
@@ -1375,13 +1385,12 @@ void ble_config_toggle(void) {
     if (s_ble_enabled) {
         Serial.println("BLE: Stopping BLE...");
         ble_config_stop();
-        FastLED.clear();
-        FastLED.show();
+        digitalWrite(BLE_LIGHT,HIGH);
         Serial.println("BLE: BLE stopped");
     } else {
         Serial.println("BLE: Starting BLE...");
         ble_config_init();
-        draw_ble_icon();
+        digitalWrite(BLE_LIGHT,LOW);
         Serial.println("BLE: BLE started");
     }
 }
