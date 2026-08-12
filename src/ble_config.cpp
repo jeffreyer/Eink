@@ -98,6 +98,10 @@ static String s_gallery_upload_filename;
 static size_t s_gallery_upload_size = 0;
 static size_t s_gallery_upload_received = 0;
 static uint8_t* s_gallery_upload_buffer = nullptr;
+static size_t s_gallery_upload_chunk_size = 0;
+static size_t s_gallery_upload_total_chunks = 0;
+static uint8_t* s_gallery_upload_chunk_flags = nullptr;
+static uint8_t* s_gallery_upload_decode_buf = nullptr;
 
 // Simple base64 decode table
 static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -736,11 +740,17 @@ static void apply_command(const String& cmd) {
     if (cmd.indexOf("\"gallery_upload_start\"") >= 0) {
         String filename;
         int size = 0;
+        int chunk_size = 0;
 
-        if (extract_string(cmd, "filename", &filename) && extract_int(cmd, "size", &size)) {
+        if (extract_string(cmd, "filename", &filename) && extract_int(cmd, "size", &size)
+            && extract_int(cmd, "chunk_size", &chunk_size)) {
             // 验证尺寸（4色屏 200*200*2bit = 10000；6色屏 240*240*4bit = 28800）
             if ((size_t)size != ALLSCREEN_BYTES) {
                 set_status("{\"ok\":false,\"error\":\"Invalid image size\"}");
+                return;
+            }
+            if (chunk_size <= 0 || chunk_size > 1024) {
+                set_status("{\"ok\":false,\"error\":\"Invalid chunk size\"}");
                 return;
             }
 
@@ -748,10 +758,34 @@ static void apply_command(const String& cmd) {
             s_gallery_upload_filename = filename;
             s_gallery_upload_size = size;
             s_gallery_upload_received = 0;
+            s_gallery_upload_chunk_size = chunk_size;
+            s_gallery_upload_total_chunks = (size + chunk_size - 1) / chunk_size;
 
             // 分配缓冲区
             s_gallery_upload_buffer = (uint8_t*)malloc(size);
             if (!s_gallery_upload_buffer) {
+                s_gallery_upload_in_progress = false;
+                set_status("{\"ok\":false,\"error\":\"Memory allocation failed\"}");
+                return;
+            }
+
+            // 分配块接收标记（按索引落位，重复/乱序到达的块直接忽略）
+            s_gallery_upload_chunk_flags = (uint8_t*)calloc(s_gallery_upload_total_chunks, 1);
+            if (!s_gallery_upload_chunk_flags) {
+                free(s_gallery_upload_buffer);
+                s_gallery_upload_buffer = nullptr;
+                s_gallery_upload_in_progress = false;
+                set_status("{\"ok\":false,\"error\":\"Memory allocation failed\"}");
+                return;
+            }
+
+            // 预分配解码缓冲区，避免每块 malloc/free（提升吞吐）
+            s_gallery_upload_decode_buf = (uint8_t*)malloc((size_t)chunk_size + 8);
+            if (!s_gallery_upload_decode_buf) {
+                free(s_gallery_upload_buffer);
+                free(s_gallery_upload_chunk_flags);
+                s_gallery_upload_buffer = nullptr;
+                s_gallery_upload_chunk_flags = nullptr;
                 s_gallery_upload_in_progress = false;
                 set_status("{\"ok\":false,\"error\":\"Memory allocation failed\"}");
                 return;
@@ -765,25 +799,49 @@ static void apply_command(const String& cmd) {
     // 接收图片数据块
     if (cmd.indexOf("\"gallery_upload_chunk\"") >= 0 && s_gallery_upload_in_progress) {
         int data_pos = cmd.indexOf("\"data\"");
-        if (data_pos >= 0) {
+        int index = 0;
+        if (data_pos >= 0 && extract_int(cmd, "index", &index)) {
+            // 按块索引落位：重复或乱序到达的块直接忽略，保证缓冲区内容不错位
+            if (index < 0 || (size_t)index >= s_gallery_upload_total_chunks
+                || !s_gallery_upload_chunk_flags || s_gallery_upload_chunk_flags[index]) {
+                return;
+            }
+
             int start = cmd.indexOf("\"", data_pos + 7) + 1;
             int end = cmd.indexOf("\"", start);
-            String encoded = cmd.substring(start, end);
 
             // Base64 解码
-            size_t max_decoded_len = (encoded.length() * 3) / 4 + 1;
-            uint8_t* decoded = (uint8_t*)malloc(max_decoded_len);
-            if (decoded) {
-                size_t decoded_len = base64_decode(encoded.c_str(), encoded.length(), decoded);
-
+            if (s_gallery_upload_decode_buf) {
+                size_t decoded_len = base64_decode(cmd.c_str() + start, end - start,
+                                                   s_gallery_upload_decode_buf);
                 if (s_gallery_upload_buffer && decoded_len > 0) {
-                    size_t copy_len = min(decoded_len, s_gallery_upload_size - s_gallery_upload_received);
-                    memcpy(s_gallery_upload_buffer + s_gallery_upload_received, decoded, copy_len);
-                    s_gallery_upload_received += copy_len;
+                    size_t offset = (size_t)index * s_gallery_upload_chunk_size;
+                    size_t copy_len = min(decoded_len, s_gallery_upload_size - offset);
+                    if (copy_len > 0) {
+                        memcpy(s_gallery_upload_buffer + offset, s_gallery_upload_decode_buf, copy_len);
+                        s_gallery_upload_chunk_flags[index] = 1;
+                        s_gallery_upload_received += copy_len;
+                    }
                 }
-                free(decoded);
             }
         }
+        return;
+    }
+
+    // 查询图片上传进度（返回从 0 起连续收到的字节数，前端据此补发缺失后缀）
+    if (cmd.indexOf("\"gallery_upload_progress\"") >= 0) {
+        size_t prefix = 0;
+        for (size_t i = 0; i < s_gallery_upload_total_chunks; i++) {
+            if (!s_gallery_upload_chunk_flags || !s_gallery_upload_chunk_flags[i]) break;
+            prefix += (i == s_gallery_upload_total_chunks - 1)
+                      ? (s_gallery_upload_size - i * s_gallery_upload_chunk_size)
+                      : s_gallery_upload_chunk_size;
+        }
+        char progress_buf[64];
+        snprintf(progress_buf, sizeof(progress_buf),
+                 "{\"ok\":true,\"received\":%d,\"size\":%d}",
+                 (int)prefix, (int)s_gallery_upload_size);
+        set_status(progress_buf);
         return;
     }
 
@@ -805,10 +863,20 @@ static void apply_command(const String& cmd) {
             free(s_gallery_upload_buffer);
             s_gallery_upload_buffer = nullptr;
         }
+        if (s_gallery_upload_chunk_flags) {
+            free(s_gallery_upload_chunk_flags);
+            s_gallery_upload_chunk_flags = nullptr;
+        }
+        if (s_gallery_upload_decode_buf) {
+            free(s_gallery_upload_decode_buf);
+            s_gallery_upload_decode_buf = nullptr;
+        }
         s_gallery_upload_in_progress = false;
         s_gallery_upload_filename = "";
         s_gallery_upload_size = 0;
         s_gallery_upload_received = 0;
+        s_gallery_upload_chunk_size = 0;
+        s_gallery_upload_total_chunks = 0;
 
         String response = success ? "{\"ok\":true}" : "{\"ok\":false,\"error\":\"Save failed\"}";
         set_status(response);
@@ -1172,7 +1240,16 @@ class ConfigWriteCallbacks : public NimBLECharacteristicCallbacks {
         std::string valueStd = characteristic->getValue();
         if (valueStd.length() == 0) return;
 
-        s_pending_cmd = String(valueStd.c_str());
+        String cmd = String(valueStd.c_str());
+
+        // 图片上传命令直接在 BLE 回调中处理：
+        // 避免单槽命令队列被高频分块覆盖导致丢块，也让写入吞吐匹配链路速度
+        if (cmd.indexOf("\"gallery_upload_") >= 0) {
+            apply_command(cmd);
+            return;
+        }
+
+        s_pending_cmd = cmd;
         s_has_pending_cmd = true;
     }
 };
