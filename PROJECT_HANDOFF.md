@@ -189,9 +189,10 @@ Status Char:   8C0B8A12-7E3D-4DF7-9A2A-1D8D46F8B100 (READ | NOTIFY)
 
 // 相册相关（仅MiniEink）
 {"gallery_list": true}             // 获取图片列表
-{"gallery_upload_start": true, "filename": "...", "size": 28800} // 开始上传（6色=28800，4色=10000）
-{"gallery_upload_chunk": true, "data": "base64..."}              // 上传数据块
-{"gallery_upload_complete": true}                                // 上传完成
+{"gallery_upload_start": true, "filename": "...", "size": 28800, "chunk_size": 336} // 开始上传（6色=28800，4色=10000）
+{"gallery_upload_chunk": true, "index": 0, "data": "base64..."}  // 上传数据块（带索引，按固定偏移落位）
+{"gallery_upload_progress": true}                                // 查询已连续接收的字节数（丢包补齐用）
+{"gallery_upload_complete": true}                                // 上传完成（返回真实保存结果 ok/error）
 {"gallery_get": true, "filename": "..."}                         // 获取图片
 {"gallery_show": true, "filename": "..."}                        // 显示图片
 {"gallery_delete": 2}                                            // 删除索引2
@@ -214,6 +215,13 @@ Status Char:   8C0B8A12-7E3D-4DF7-9A2A-1D8D46F8B100 (READ | NOTIFY)
 // Gallery图片响应
 {"image_data": "base64encoded..."}
 
+// 上传进度响应（gallery_upload_progress）
+{"ok": true, "received": 13104, "size": 28800}  // received=从0起连续收到的字节数
+
+// 上传保存结果回执（gallery_upload_complete，前端 uploadComplete 等待此响应）
+{"ok": true}                                   // 保存成功
+{"ok": false, "error": "Save failed"}          // 保存失败（如磁盘满）
+
 // 分块传输（大数据自动分块，每块约200字节）
 {"chunk": 0, "total": 5, "data": "..."}
 {"chunk": 1, "total": 5, "data": "..."}
@@ -234,7 +242,18 @@ Status Char:   8C0B8A12-7E3D-4DF7-9A2A-1D8D46F8B100 (READ | NOTIFY)
   - `manifestCallback` - 模块配置
   - `galleryListCallback` - 图片列表
   - `galleryImageCallback` - 单张图片
+  - `uploadResultCallback` - 图片上传进度/保存结果回执（含 `ok` 字段的状态）
 - 自动合并分块，验证完整性
+
+**图片上传（前端 → 设备，`gallery.js uploadImageToDevice`）**:
+- 336 字节/块（base64 448 字符 + JSON ≈ 487，适配 512 MTU），每块带 `index`
+- 设备端在 **BLE 回调中直通处理**图片上传命令（绕过单槽 `s_pending_cmd` 队列，
+  避免高频分块覆盖丢块），按 `index*chunk_size` 固定偏移落位，重复/乱序块忽略
+- 前端 15ms 块间隔 + 写失败退避重试；发完后轮询 `gallery_upload_progress`，
+  只有进度连续无变化才补发缺失后缀（最多8轮）
+- 全部收满后才发 `gallery_upload_complete`，并等待设备端真实保存结果
+  （`uploadComplete()`，15 秒超时），失败则提示设备返回的错误
+- 预期耗时：28800 字节约 2-3 秒（原 256 字节/100ms 限速版约 11 秒）
 
 ---
 
@@ -269,6 +288,9 @@ class Bluetooth {
       } else if (status.image_data) {
         // gallery image数据
         if (this.galleryImageCallback) this.galleryImageCallback(status);
+      } else if (status.ok !== undefined && this.uploadResultCallback) {
+        // 上传进度/保存结果回执
+        this.uploadResultCallback(status);
       } else {
         // 普通状态更新
         app.globalData.deviceStatus = status;
@@ -390,6 +412,31 @@ BLE 通知做了节流与退避（`notify()` 失败延时重试、成功后 2ms 
 
 ---
 
+### 问题5: 图片上传提速后丢块/花图（单槽命令队列）
+
+**现象**:
+- 提速版（0ms 连发）设备只收到 13104/28800 字节（正好 39 块），前端却全写"成功"
+- 加上 20ms 限速 + 补发后，墨水屏显示完全错位的花图
+
+**根因**:
+- 设备端 `onWrite` 回调只把命令存入**单槽变量** `s_pending_cmd`，由主循环
+  `ble_config_update()` 逐个取出处理；高频分块时新命令覆盖旧命令 → 静默丢块
+- 前端写 API 只代表"写入链路成功"，不代表设备已处理（丢块无法感知）
+- 修复 v2 的"按接收偏移追加"在补发与原始队列交错时错位写入 → 花图
+
+**解决方案**:
+1. 设备端：图片上传命令（start/chunk/progress/complete）在 **BLE 回调中直通处理**，
+   绕过单槽队列；预分配解码缓冲区，去掉每块 String 拷贝与 malloc/free
+2. 分块带 `index`，按 `index*chunk_size` 固定偏移落位，重复/乱序块直接忽略
+   （无论补发怎么交错都不会写错位）
+3. 新增 `gallery_upload_progress`：返回"从0起连续收到的字节数"（前缀），
+   前端轮询进度，只有连续两次无进展才补发缺失后缀
+4. 前端 `uploadComplete()` 等待设备真实保存结果，失败提示具体错误
+
+**修改文件**: `src/ble_config.cpp`、`utils/bluetooth.js`、`pages/gallery/gallery.js`
+
+---
+
 ## 功能特性
 
 ### 1. 设备端特性
@@ -397,7 +444,8 @@ BLE 通知做了节流与退避（`notify()` 失败延时重试、成功后 2ms 
 #### 相册功能 (gallery.cpp)
 - 图片存储：SPIFFS文件系统
 - 支持格式：4色屏 2bit（200x200，10,000字节）；6色屏 4bit（240x240，28,800字节）
-- 上传：分块上传，每块256字节
+- 上传：336字节分块 + 索引落位，设备端 BLE 回调直通处理 + 进度校验补发，
+  预期 2-3 秒（详见"BLE通信协议 → 图片上传"）
 - 旋转：0°/90°/180°/270° 四个方向（**全局配置**，位于模块页“显示方向”，
   通过 `gallery_rotation` 键保存，设备状态含 `rotation` 字段）
   - 相册：显示时旋转帧缓冲（`rotate_image` / `rotate_image6`）
@@ -418,11 +466,20 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
 ### 2. 小程序特性
 
 #### 相册管理 (gallery页面)
-- ✅ 图片上传：选择相册/拍照，按设备 `ink` 自动转换为 4色2bit 或 6色4bit（含蓝/绿）
+- ✅ 图片上传：选择相册/拍照 → 编辑页处理 → 上传；按设备 `ink` 自动转换
+  - 编辑页无确定/取消按钮，主按钮为"预览上传"
+  - 预览弹窗：抖动算法选择（Floyd/Atkinson/Burkes/Stucki/无抖动）+ 亮度/对比度/冷暖
+    滑块（实时预览）+ 右上角"上传"按钮
+  - 转换管道：用户调节 → 肤色暖化(warmEnhance) → 色相分类 → 色相门控抖动 → 打包
+    （肤色暖化仅对暖色皮肤提红压蓝，避免面部偏冷；色相门控防止误差扩散串色）
+  - 上传等待设备真实保存结果，失败显示设备返回的错误（如 Save failed）
+- ✅ 图片文件名：`img_年月日时分秒.img`（如 img_20260812114147.img），非毫秒时间戳
 - ✅ 图片预览：点击占位符从设备获取，支持进度显示
 - ✅ 批量删除：长按进入批量模式
 - ✅ 显示到墨水屏：一键推送显示
 - ✅ 本地缓存：已获取的图片缓存在本地存储
+  - 缓存键 `gallery_image_cache_v2`（v1 按旧名义色板生成，已作废清理）
+  - 6色缩略图解码色板与编辑页校准色板一致，避免列表蓝色过艳
 - ✅ 下拉刷新：手动刷新列表
 - ⚠️ 仅MiniEink设备可用，其他设备会提示
 
@@ -513,6 +570,19 @@ if (!manifest.id || !manifest.configs) {
 
 ---
 
+### 6. ⚠️ BLE 单槽命令队列（设备端）
+
+**问题**: 设备端 `onWrite` 只把命令存入单个 `s_pending_cmd` 变量，
+主循环逐个处理；高频命令（如图片分块）会覆盖未处理的旧命令 → 静默丢块，
+且前端写 API 无法感知（写"成功"≠设备已处理）。
+
+**解决**:
+- 高频命令（图片上传）在 BLE 回调中直通处理，不经过单槽队列
+- 需要重传语义的命令带 `index`，设备按固定偏移落位、重复块忽略
+- 前端以设备实际接收进度为准（`gallery_upload_progress`），不要信任写返回值
+
+---
+
 ## 编译与调试
 
 ### 设备端编译
@@ -558,6 +628,9 @@ cd /d/Projects/Eink
 - `bluetooth.js::manifestCallback` - 模块配置响应
 - `bluetooth.js::galleryListCallback` - 图片列表响应
 - `bluetooth.js::galleryImageCallback` - 单张图片响应
+- `bluetooth.js::uploadResultCallback` - 图片上传进度/保存结果回执
+- `bluetooth.js::uploadComplete()` - 等待设备端真实保存结果
+- `bluetooth.js::getUploadProgress()` - 查询上传接收进度（丢包补齐）
 
 ---
 
