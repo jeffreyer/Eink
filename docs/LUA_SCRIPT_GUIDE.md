@@ -134,7 +134,7 @@ end
     "desc": "选择时间显示格式"
   },
   {
-    "key": "refresh_interval",
+    "key": "refresh",
     "type": "slider",
     "label": "刷新间隔",
     "min": 30,
@@ -178,7 +178,7 @@ end
 ```lua
 -- 读取配置（提供默认值）
 local format = CONFIG.time_format or "24h"
-local interval = CONFIG.refresh_interval or 60
+local interval = CONFIG.refresh or 60
 local message = CONFIG.message or "Hello"
 
 -- 正确处理布尔值
@@ -354,6 +354,32 @@ local start = time.millis()
 local elapsed = time.millis() - start
 print("耗时: " .. elapsed .. "ms")
 ```
+
+### 2.5 sys - 系统信息
+
+#### sys.wake_source()
+
+获取本次启动的唤醒源（深度休眠唤醒原因）：
+
+```lua
+local source = sys.wake_source()  -- 0=上电/未知, 1=GPIO按键唤醒, 2=定时器唤醒
+
+if sys.wake_source() == 1 then
+    -- 按键唤醒：墨水屏保留上次画面，通常无需重绘
+end
+```
+
+典型用法：`setup()` 里判断如果是按键唤醒就跳过 `draw_screen()`，
+避免每次按键唤醒都触发一次墨水屏刷新（6色屏刷新约 30-40 秒）。
+
+**注意**：唤醒源只在**启动后的初始显示**期间有效——首个模块 `setup()`
+完成后设备端会消费该状态，之后 `sys.wake_source()` 恒返回 0。
+因此 BLE"刷新显示"、切换模块等显式重载触发的 `setup()` 会正常重绘，
+不会因为本次是按键唤醒而再次跳过。
+
+#### sys.page_index()
+
+获取当前模块页索引（`subpage_index`）。
 
 ### 3. 标准 Lua 库
 
@@ -618,11 +644,11 @@ text_centered(90, "Hello", 3)
 ### 5. 使用配置默认值
 ```lua
 -- ✅ 好：提供默认值
-local interval = CONFIG.refresh_interval or 60
+local interval = CONFIG.refresh or 60
 local format = CONFIG.time_format or "24h"
 
 -- ❌ 差：直接使用可能为nil
-local interval = CONFIG.refresh_interval  -- 可能为nil
+local interval = CONFIG.refresh  -- 可能为nil
 ```
 
 ### 6. 避免频繁创建表

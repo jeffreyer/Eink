@@ -75,13 +75,22 @@
 
 | 按键 | 短按 | 长按(3秒) |
 |------|------|------|
-| KEY_UP | 上一页（subpage-1，触发模块重绘） | 开关 BLE 配置 |
-| KEY_DOWN | 下一页（subpage+1，触发模块重绘） | 进入深度休眠 |
+| KEY_UP | 模块"上一项"钩子（`subpage_prev`，相册=上一张）；无钩子则 subpage-1 | 开关 BLE 配置 |
+| KEY_DOWN | 模块"下一项"钩子（`subpage_next`，相册=下一张）；无钩子则 subpage+1 | 进入深度休眠 |
+
+模块可在 `module_descriptor_t` 注册 `subpage_next/subpage_prev` 自定义按键行为
+（`gallery` 注册为上一张/下一张，其他模块默认 subpage ±1，互不影响）。
+深度休眠被 KEY_DOWN 唤醒时，`setup()` 检测 GPIO 唤醒原因并标记"下一项"，
+当前模块 `setup` 消费后直接显示（相册在 `gallery_setup` 内消费，只刷新一次）。
 
 ### BLE 状态字段
 
 `get_status` 新增 `"ink": 6`（4色屏为 4），小程序据此选择图片格式
 （6色：240x240 4bpp / 28,800 字节；4色：200x200 2bpp / 10,000 字节）。
+
+**电量字段**：状态 JSON 只回传 `"battery_mv"`（分压后电压，分压系数2），
+百分比由前端自行换算（3300mV~4200mV → 0-100%，`bluetooth.js applyBatteryPercent()`）。
+首次状态请求时触发一次 ADC 采样；`is_chk_bat`（串口命令开启）开启后主循环每 3 秒刷新缓存。
 
 ---
 
@@ -452,6 +461,8 @@ BLE 通知做了节流与退避（`notify()` 失败延时重试、成功后 2ms 
   - Lua 模块（倒计时等）：`display_prepare_canvas()` 统一 `Paint_SetRotate`，
     重绘（退出 BLE / 刷新显示）后整屏生效
 - 循环播放：可配置间隔（1分钟~24小时）
+- 按键切换：KEY_DOWN 下一张 / KEY_UP 上一张（模块钩子 `subpage_next/subpage_prev`，
+  深度休眠 KEY_DOWN 唤醒时直接显示下一张）
 - 限制：仅MiniEink设备支持
 
 **配置项** (`data/gallery.cfg`):
@@ -462,6 +473,17 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
 - 深度休眠：定时器唤醒
 - 配置：30秒~30分钟，或永不休眠
 - 自动保存配置到NVS
+- **模块定时唤醒**：`module_descriptor_t` 的 `wake_interval` 钩子返回秒（0=不启用），
+  `enter_deep_sleep()` 按当前模块配置 `esp_sleep_enable_timer_wakeup`
+  - 相册：循环播放模式下按 `cycle_interval`（分钟）定时唤醒切换
+  - Lua 模块：通用实现读取模块配置 `refresh`（**小时**，如倒计时默认6小时；
+    NVS 键名最长15字符，故配置键须 ≤15），
+    定时唤醒后 `setup()` 重绘（`sys.wake_source()==2`），按键唤醒则跳过重绘
+
+**时间与时区**：
+- 时间戳（UTC）由 BLE `sync_time` 同步，`TimeCalibration` 存 RTC 内存（深睡保持）
+- 时区偏移同时存 RTC 内存与 NVS（`system/tz_offset`），掉电后从 NVS 恢复；
+  `sync_time` 命令未携带 `timezone` 字段时不会清零已有时区（避免倒计时差8小时）
 
 ### 2. 小程序特性
 
@@ -485,6 +507,7 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
 
 #### 模块管理 (modules页面)
 - 模块列表：显示已安装模块
+- **电量显示**：顶部设备名右侧显示 🔋 百分比（<20% 变红），前端由 `battery_mv` 换算
 - 开关控制：启用/禁用模块
 - 配置入口：点击进入详细配置
 - 删除模块：卸载模块

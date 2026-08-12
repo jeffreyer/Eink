@@ -30,6 +30,9 @@ static module_descriptor_t k_builtin_modules[] = {
         .setup = gallery_setup,
         .unload = gallery_unload,
         .loop = gallery_loop,
+        .subpage_next = gallery_next_image,
+        .subpage_prev = gallery_prev_image,
+        .wake_interval = gallery_wake_interval,
         .config_count = 0,
         .built_in = true
     }
@@ -58,12 +61,16 @@ static bool s_dynamic_lua_loaded[MAX_DYNAMIC_MODULES];
 static int dynamic_lua_setup(void);
 static int dynamic_lua_loop(void);
 static int dynamic_lua_unload(void);
+static int dynamic_lua_wake_interval(void);
 
 // Current dynamic module being executed
 static int s_current_dynamic_module = -1;
 
 // 待处理配置变更的模块 id（BLE 写入 NVS 后标记，主循环消费）
 static char s_pending_config_module[64] = {0};
+
+// KEY_DOWN 唤醒标记（"下一项"意图，由当前模块 setup 消费）
+static bool s_wake_next = false;
 
 static String json_escape(const char* value) {
   String s;
@@ -238,6 +245,7 @@ static bool load_dynamic_lua_module(const char* filename, const char* base_dir) 
   module->setup = dynamic_lua_setup;
   module->unload = dynamic_lua_unload;
   module->loop = dynamic_lua_loop;
+  module->wake_interval = dynamic_lua_wake_interval;
   module->config_count = 0;
   module->built_in = false;
 
@@ -451,6 +459,30 @@ void module_registry_refresh_current(void) {
   // 手动刷新会立即应用最新配置，清除待处理标记避免退出 BLE 时重复重载
   s_pending_config_module[0] = 0;
   reload_module_at(page_index);
+}
+
+void module_registry_mark_wake_next(void) {
+  s_wake_next = true;
+}
+
+bool module_registry_consume_wake_next(void) {
+  bool value = s_wake_next;
+  s_wake_next = false;
+  return value;
+}
+
+// 查询当前模块的深度休眠定时唤醒间隔（秒；0 = 不启用）
+uint32_t module_registry_get_wake_interval(void) {
+  extern int32_t page_index;
+  if (page_index < 0 || page_index >= s_total_module_count) {
+    return 0;
+  }
+  const module_descriptor_t* module = s_all_modules[page_index];
+  if (!module || !module->wake_interval) {
+    return 0;
+  }
+  int seconds = module->wake_interval();
+  return seconds > 0 ? (uint32_t)seconds : 0;
 }
 
 uint8_t module_registry_count(void) {
@@ -852,4 +884,22 @@ static int dynamic_lua_unload(void) {
 
   Serial.println("Dynamic Lua unload: Success");
   return 0;
+}
+
+// 动态 Lua 模块的定时唤醒间隔：读取模块配置 refresh（小时）→ 返回秒
+static int dynamic_lua_wake_interval(void) {
+  extern int32_t page_index;
+  if (page_index < 0 || page_index >= s_total_module_count) {
+    return 0;
+  }
+  const module_descriptor_t* module = s_all_modules[page_index];
+  if (!module || module->built_in || !module->id) {
+    return 0;
+  }
+
+  int hours = load_config_ns(String(module->id), "refresh");
+  if (hours <= 0) {
+    return 0;
+  }
+  return hours * 3600;
 }

@@ -156,11 +156,16 @@ void check_btn(){
       Serial.println("KEY_UP press detected");
 
       if (!ble_config_is_enabled()) {
-        if (subpage_index > 0) {
+        const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
+        if (current && current->subpage_prev) {
+          // 模块自定义"上一项"（如相册显示上一张）
+          current->subpage_prev();
+          Serial.println("KEY_UP: module prev action");
+        } else if (subpage_index > 0) {
           subpage_index--;
-          module_registry_refresh_current();
           Serial.printf("Subpage: %d\n", subpage_index);
         }
+        // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
       }
     }
     key_up_triggered=false;
@@ -189,9 +194,16 @@ void check_btn(){
       Serial.println("KEY_DOWN press detected");
 
       if (!ble_config_is_enabled()) {
-        subpage_index++;
-        module_registry_refresh_current();
-        Serial.printf("Subpage: %d\n", subpage_index);
+        const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
+        if (current && current->subpage_next) {
+          // 模块自定义"下一项"（如相册显示下一张）
+          current->subpage_next();
+          Serial.println("KEY_DOWN: module next action");
+        } else {
+          subpage_index++;
+          Serial.printf("Subpage: %d\n", subpage_index);
+        }
+        // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
       }
     }
     key_down_triggered=false;
@@ -231,8 +243,6 @@ void check_btn(){
     btn_status = BTN_NONE;
     ble_config_toggle();
     if (!ble_config_is_enabled()){ //退出蓝牙后重新启动模块
-      // 重置休眠计时器，避免立即休眠
-      sleep_manager_reset_idle_timer();
 
       const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
       int ret;
@@ -290,11 +300,25 @@ void setup() {
 
   page_index = module_registry_normalize_index(page_index);
 
+  // KEY_DOWN 唤醒（深度休眠 GPIO 唤醒）：标记"下一项"，由当前模块 setup 消费
+  // （相册直接显示下一张；其他模块忽略该标记，保持原唤醒行为）
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO &&
+      (esp_sleep_get_gpio_wakeup_status() & (1ULL << KEY_DOWN))) {
+    module_registry_mark_wake_next();
+    Serial.println("Woke by KEY_DOWN -> mark wake-next");
+  }
+
   const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
   if (module && module->setup) {
     Serial.println("Setting up module: " + String(module->name));
     module->setup();
   }
+  // 当前模块未消费 KEY_DOWN 唤醒标记则丢弃，避免切换模块后误触发"下一项"
+  module_registry_consume_wake_next();
+
+  // 初始显示已完成：之后 sys.wake_source() 返回 0，
+  // BLE"刷新显示"等显式重载时 Lua setup 会正常重绘
+  lua_hardware_mark_boot_wake_consumed();
 
   sleep_manager_init();
 
@@ -322,7 +346,6 @@ void loop() {
   sleep_manager_update();
 
   if (ble_config_is_enabled()) {
-    ble_config_render_mode();
     delay(30);
     return;
   }

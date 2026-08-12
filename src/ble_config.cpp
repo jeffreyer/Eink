@@ -7,6 +7,7 @@
 #include "touch_icons.h"
 #include "time_calibration.h"
 #include "gallery.h"
+#include "battery.h"
 #ifdef INK6
 #include "eink6.h"
 #else
@@ -28,9 +29,12 @@ void set_timezone(int offset) {
     setenv("TZ", tz_str, 1);
     tzset();
 
-    // 保存到 RTC 内存
+    // 保存到 RTC 内存（深度休眠期间保持）
     rtc_timezone_offset = offset;
     rtc_timezone_valid = true;
+
+    // 同时持久化到 NVS（完全掉电后也能恢复）
+    save_config_ns("system", "tz_offset", offset);
 }
 
 // 恢复时区设置（在启动时调用）
@@ -40,7 +44,15 @@ void restore_timezone() {
         snprintf(tz_str, sizeof(tz_str), "UTC%+d", -rtc_timezone_offset);
         setenv("TZ", tz_str, 1);
         tzset();
-        Serial.printf("Restored timezone: UTC%+d\n", rtc_timezone_offset);
+        Serial.printf("Restored timezone: UTC%+d (RTC)\n", rtc_timezone_offset);
+        return;
+    }
+
+    // RTC 内存丢失（如完全掉电）时，从 NVS 恢复
+    int saved = load_config_ns("system", "tz_offset");
+    if (saved != 0) {
+        set_timezone(saved);  // 同时回写 RTC 内存
+        Serial.printf("Restored timezone: UTC%+d (NVS)\n", saved);
     }
 }
 
@@ -215,8 +227,25 @@ static String status_json(bool include_modules = false) {
     s += ",\"page\":" + String(page_index);
     s += ",\"subpage\":" + String(subpage_index);
     s += ",\"page_count\":" + String(app_get_page_count());
+    s += ",\"battery_mv\":" + String(battery_get_mv());
     if (include_modules) {
-        // s += ",\"modules\":" + module_registry_status_json();
+        // 紧凑模块列表（i/id/n/b/e/c），与小程序 readStatus 解析格式一致
+        s += ",\"modules\":[";
+        int total_modules = module_registry_count();
+        for (int i = 0; i < total_modules; i++) {
+            if (i > 0) s += ",";
+            const module_descriptor_t* m = module_registry_get(i);
+            if (m) {
+                s += "{\"i\":" + String(i);
+                s += ",\"id\":\"" + String(m->id) + "\"";
+                s += ",\"n\":\"" + String(m->name) + "\"";
+                s += ",\"b\":" + String(m->built_in ? 1 : 0);
+                s += ",\"e\":" + String(module_registry_is_enabled(i) ? 1 : 0);
+                s += ",\"c\":" + String(m->config_count);
+                s += "}";
+            }
+        }
+        s += "]";
     }
     s += "}";
     return s;
@@ -402,42 +431,7 @@ static void apply_command(const String& cmd) {
     // 处理获取状态请求
     if (cmd.indexOf("\"get_status\"") >= 0) {
         // 构建完整状态 JSON，包含所有模块
-        String status = "{";
-
-        uint32_t sleep_sec = s_idle_timeout_ms / 1000;
-        String mac = NimBLEDevice::getAddress().toString().c_str();
-        status += "\"ok\":true,";
-        status += "\"model\":\"" + String(DEVICE_MODEL) + "\",";
-        status += "\"ink\":" + String(INK_COLORS) + ",";
-        status += "\"rotation\":" + String(load_config_ns("gallery", "rotation")) + ",";
-        status += "\"mac\":\"" + mac + "\",";
-        status += "\"sleep_sec\":" + String(sleep_sec) + ",";
-        status += "\"page\":" + String(page_index) + ",";
-        status += "\"subpage\":" + String(subpage_index) + ",";
-        status += "\"page_count\":" + String(app_get_page_count()) + ",";
-
-        status += "\"modules\":[";
-
-        int total_modules = module_registry_count();
-        for (int i = 0; i < total_modules; i++) {
-            if (i > 0) status += ",";
-
-            const module_descriptor_t* m = module_registry_get(i);
-            if (m) {
-                status += "{\"i\":" + String(i);
-                status += ",\"id\":\"" + String(m->id) + "\"";
-                status += ",\"n\":\"" + String(m->name) + "\"";
-                status += ",\"b\":" + String(m->built_in ? 1 : 0);
-                status += ",\"e\":" + String(module_registry_is_enabled(i) ? 1 : 0);
-                status += ",\"c\":" + String(m->config_count);
-                status += "}";
-            }
-        }
-
-        status += "]}";
-
-        // 由 set_status 自动处理分块传输
-        set_status(status);
+        set_status(status_json(true));
         return;
     }
 
@@ -1184,15 +1178,18 @@ static void apply_command(const String& cmd) {
             // 解析时区偏移量
             int timezone_offset = 0;
             int tz_pos = cmd.indexOf("\"timezone\"");
-            if (tz_pos >= 0) {
+            bool tz_present = (tz_pos >= 0);
+            if (tz_present) {
                 int tz_colon = cmd.indexOf(":", tz_pos);
                 int tz_comma = cmd.indexOf(",", tz_colon);
                 if (tz_comma < 0) tz_comma = cmd.indexOf("}", tz_colon);
                 timezone_offset = cmd.substring(tz_colon + 1, tz_comma).toInt();
             }
 
-            // 设置时区（会自动保存到 RTC 内存）
-            set_timezone(timezone_offset);
+            // 只有命令携带时区字段才更新时区，避免无时区同步把已有时区清零
+            if (tz_present) {
+                set_timezone(timezone_offset);
+            }
 
             // 使用时间校准模块同步时间（自动计算漂移率并校准）
             TimeCalibration::sync_time(timestamp);
@@ -1498,13 +1495,6 @@ void ble_config_toggle(void) {
         digitalWrite(BLE_LIGHT,LOW);
         Serial.println("BLE: BLE started");
     }
-}
-
-void ble_config_render_mode(void) {
-    if (!s_ble_enabled) return;
-
-    // 不显示颜色时，显示 BLE 图标
-    // draw_ble_icon();
 }
 
 void ble_config_unbind(void) {

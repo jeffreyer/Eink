@@ -13,6 +13,7 @@
 #include <Preferences.h>
 #include "sleep_manager.h"
 #include "ble_config.h"
+#include "module_registry.h"
 
 // 墨水屏尺寸定义
 #ifdef INK6
@@ -207,6 +208,36 @@ void gallery_do_cycle() {
 
     gallery_display_by_index(s_current_image_index);
     s_last_display_time = millis();  // 更新时间
+}
+
+// 模块按键钩子：KEY_DOWN 显示下一张（复用循环切换逻辑，避免重复代码）
+int gallery_next_image(void) {
+    gallery_do_cycle();
+    return 0;
+}
+
+// 模块按键钩子：KEY_UP 显示上一张
+int gallery_prev_image(void) {
+    if (!s_initialized || s_image_list.empty()) {
+        return 0;
+    }
+
+    s_current_image_index--;
+    if (s_current_image_index < 0) {
+        s_current_image_index = (int)s_image_list.size() - 1;  // 回绕到最后一张
+    }
+    save_config_ns("gallery", "img_index", s_current_image_index);
+    gallery_display_by_index(s_current_image_index);
+    s_last_display_time = millis();
+    return 0;
+}
+
+// 模块定时唤醒钩子：循环播放时按循环间隔定时唤醒切换，否则不启用定时唤醒
+int gallery_wake_interval(void) {
+    if (s_display_mode == 1 && !s_image_list.empty()) {
+        return s_cycle_interval * 60;  // 分钟 → 秒
+    }
+    return 0;
 }
 
 // 配置管理函数
@@ -452,6 +483,12 @@ int gallery_setup(void) {
     s_image_list = gallery_list_images();
     s_initialized = true;
     s_last_display_time = millis();  // 初始化时间
+
+    // KEY_DOWN 唤醒：直接显示下一张（避免先显示当前张再切换的双刷新）
+    if (module_registry_consume_wake_next() && !s_image_list.empty()) {
+        gallery_next_image();
+        enter_deep_sleep();
+    }
 
     // 如果有图片，显示第一张
     if (!s_image_list.empty()) {

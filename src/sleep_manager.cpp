@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <esp_sleep.h>
 #include "driver/rtc_io.h"
-#include "gallery.h"
+#include "module_registry.h"
 
 uint32_t s_idle_timeout_ms = IDLE_TIMEOUT_DEFAULT*1000;
 static bool s_initialized = false;
@@ -23,11 +23,13 @@ void enter_deep_sleep(void) {
   gpio_wakeup_enable((gpio_num_t)KEY_DOWN,GPIO_INTR_LOW_LEVEL);
   esp_deep_sleep_enable_gpio_wakeup(1ULL << KEY_DOWN,ESP_GPIO_WAKEUP_GPIO_LOW);
 
-  if (gallery_get_display_mode()==1 && !gallery_get_images().empty()) {
+  // 按当前模块的定时唤醒间隔配置深度休眠定时唤醒（0 = 不启用，仅按键唤醒）
+  uint32_t wake_seconds = module_registry_get_wake_interval();
+  if (wake_seconds > 0) {
     esp_sleep_enable_timer_wakeup(
-        gallery_get_cycle_interval() * 60 * 1000000ULL   // 单位：微秒
+        (uint64_t)wake_seconds * 1000000ULL   // 单位：微秒
     );
-    Serial.printf("Gallery: Cycle mode enabled, entering sleep for %d minutes\n", gallery_get_cycle_interval());
+    Serial.printf("Deep sleep: timer wakeup in %u seconds\n", (unsigned)wake_seconds);
   }
 
   esp_deep_sleep_start();

@@ -165,11 +165,14 @@ end
 
 function setup()
     last_update = 0
-    draw_screen()
+    -- 按键唤醒时墨水屏仍保留上次画面，跳过重绘避免无谓刷新
+    if sys.wake_source() ~= 1 then
+        draw_screen()
+    end
 end
 
 function loop()
-    local interval = (math.floor(tonumber(CONFIG.refresh_interval) or 3600)) * 1000
+    local interval = (math.floor(tonumber(CONFIG.refresh) or 6)) * 1000 * 3600
     if interval < 30000 then interval = 30000 end
 
     local now_ms = time.millis()
@@ -181,7 +184,7 @@ function loop()
         end
     end
 
-    time.delay(1000)
+    time.delay(10)
 end
 
 function unload()

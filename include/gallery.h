@@ -34,6 +34,13 @@ int gallery_get_current_index();
 // 设置当前图片索引
 void gallery_set_current_index(int index);
 
+// 模块按键钩子：KEY_DOWN 显示下一张 / KEY_UP 显示上一张
+int gallery_next_image(void);
+int gallery_prev_image(void);
+
+// 模块定时唤醒钩子：循环模式下返回循环间隔（秒），否则 0
+int gallery_wake_interval(void);
+
 // 保存上传的图片数据
 bool gallery_save_image(const char* filename, const uint8_t* data, size_t size);
 

@@ -6,6 +6,9 @@
 #include "lua_hardware_api.h"
 
 bool calibrated=false;
+static int s_battery_mv = 0;
+static int s_battery_percent = 0;
+static bool s_battery_read = false;
 
 uint32_t readADCVoltage()
 {
@@ -22,16 +25,31 @@ uint32_t readADCVoltage()
 }
 
 int check_bat(){
-     // ADC脚实际电压
+    // ADC脚实际电压
     uint32_t adc_mv = readADCVoltage();
 
-
     // 根据分压还原输入电压
-    float voltage = adc_mv *
-                     2.0;  // 分压系数为2，假设使用了1:1的分压电阻网络
+    float voltage = adc_mv * 2.0f;  // 分压系数为2，假设使用了1:1的分压电阻网络
 
-    Serial.printf("Battery voltage: %.2f mV\n", voltage);
-    return voltage;
+    s_battery_mv = (int)voltage;
+    s_battery_read = true;
+
+    // 线性映射 3300mV~4200mV → 0~100%（1S 锂电）
+    int pct = (s_battery_mv - 3300) * 100 / 900;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    s_battery_percent = pct;
+    is_low_bat = (s_battery_mv < 3400);
+
+    Serial.printf("Battery voltage: %d mV (%d%%)\n", s_battery_mv, pct);
+    return s_battery_mv;
+}
+
+int battery_get_mv(void) {
+    if (!s_battery_read) {
+        check_bat();
+    }
+    return s_battery_mv;
 }
 
 int check_battery_init() {

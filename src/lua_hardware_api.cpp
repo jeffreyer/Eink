@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <FastLED.h>
 #include <Preferences.h>
+#include "esp_sleep.h"
 #include "app_control.h"
 #include "common.h"
 #include "sleep_manager.h"
@@ -531,8 +532,35 @@ static int lua_sys_page_index(lua_State* L) {
   return 1;
 }
 
+// 本次启动的"唤醒意图"是否已被初始显示消费
+static bool s_boot_wake_consumed = false;
+
+// 唤醒源：0=上电/未知, 1=GPIO按键唤醒, 2=定时器唤醒
+// 启动后首次调用返回真实唤醒源；被标记消费后（初始显示完成）返回 0，
+// 这样 BLE"刷新显示"等显式重载时 setup 会正常重绘
+static int lua_sys_wake_source(lua_State* L) {
+  int source = 0;
+  if (!s_boot_wake_consumed) {
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    if (cause == ESP_SLEEP_WAKEUP_GPIO) {
+      source = 1;
+    } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+      source = 2;
+    }
+  }
+  lua_pushnumber(L, source);
+  return 1;
+}
+
+// 标记本次启动的初始显示已完成（主程序在首个模块 setup 后调用），
+// 之后 sys.wake_source() 返回 0，显式刷新/切换模块会正常重绘
+void lua_hardware_mark_boot_wake_consumed() {
+  s_boot_wake_consumed = true;
+}
+
 static const luaL_Reg sys_lib[] = {
   {"page_index", lua_sys_page_index},
+  {"wake_source", lua_sys_wake_source},
   {NULL, NULL}
 };
 

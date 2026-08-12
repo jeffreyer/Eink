@@ -27,5 +27,9 @@ void lua_hardware_send_button_event(int event_type);
 // 设置按键按住状态
 void lua_hardware_set_button_holding(bool holding);
 
+// 标记本次启动的初始显示已完成（首个模块 setup 后调用），
+// 之后 sys.wake_source() 返回 0
+void lua_hardware_mark_boot_wake_consumed();
+
 int draw_led_text(const char* text,int x,int y,int r,int g,int b);
 int draw_led_text_rotated(const char* text, int x, int y, int r, int g, int b);

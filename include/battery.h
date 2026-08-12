@@ -16,3 +16,5 @@ static bool is_low_bat=false;
 int check_bat();
 
 int check_battery_init();
+
+int battery_get_mv();
