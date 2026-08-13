@@ -28,8 +28,6 @@
 
 extern int32_t page_index,subpage_index;
 
-extern bool is_chk_bat;
-
 int load_config(String key);
 void save_config(String key,int value);
 

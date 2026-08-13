@@ -76,7 +76,7 @@
 | 按键 | 短按 | 长按(3秒) |
 |------|------|------|
 | KEY_UP | 模块"上一项"钩子（`subpage_prev`，相册=上一张）；无钩子则 subpage-1 | 开关 BLE 配置 |
-| KEY_DOWN | 模块"下一项"钩子（`subpage_next`，相册=下一张）；无钩子则 subpage+1 | 进入深度休眠 |
+| KEY_DOWN | 模块"下一项"钩子（`subpage_next`，相册=下一张）；无钩子则 subpage+1 | 切换下一个启用模块（`module_registry_next_enabled`，按住3秒即触发，并保存当前模块） |
 
 模块可在 `module_descriptor_t` 注册 `subpage_next/subpage_prev` 自定义按键行为
 （`gallery` 注册为上一张/下一张，其他模块默认 subpage ±1，互不影响）。
@@ -90,7 +90,7 @@
 
 **电量字段**：状态 JSON 只回传 `"battery_mv"`（分压后电压，分压系数2），
 百分比由前端自行换算（3300mV~4200mV → 0-100%，`bluetooth.js applyBatteryPercent()`）。
-首次状态请求时触发一次 ADC 采样；`is_chk_bat`（串口命令开启）开启后主循环每 3 秒刷新缓存。
+首次状态请求时触发一次 ADC 采样。
 
 ---
 
@@ -462,7 +462,14 @@ BLE 通知做了节流与退避（`notify()` 失败延时重试、成功后 2ms 
     重绘（退出 BLE / 刷新显示）后整屏生效
 - 循环播放：可配置间隔（1分钟~24小时）
 - 按键切换：KEY_DOWN 下一张 / KEY_UP 上一张（模块钩子 `subpage_next/subpage_prev`，
-  深度休眠 KEY_DOWN 唤醒时直接显示下一张）
+  深度休眠按键唤醒时相册**不预显示**（`module_registry_peek_wake_key` 只读查询）。
+  setup 显示耗时较长，唤醒按键可能在轮询前已松开——`check_btn` 会补发一次短按事件：
+  KEY_DOWN 短按 → 下一张并进入深度休眠；KEY_UP 短按 → 上一张并进入深度休眠；
+  长按 KEY_DOWN（3秒）→ 只触发"切换下一个模块"；长按 KEY_UP → 开关 BLE，
+  均不执行短按动作。休眠唤醒长按切模块后，等 KEY_DOWN 释放再进入深度休眠
+  （`s_sleep_after_wake_switch`，避免按住时立即休眠导致低电平再次唤醒）
+- 进入相册模块（上电 / 按键唤醒 / 从其他模块切换）：`gallery_setup` 兜底显示
+  已保存 `img_index` 对应的当前图片；定时唤醒（循环模式）才显示下一张
 - 限制：仅MiniEink设备支持
 
 **配置项** (`data/gallery.cfg`):

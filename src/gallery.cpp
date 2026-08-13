@@ -484,11 +484,9 @@ int gallery_setup(void) {
     s_initialized = true;
     s_last_display_time = millis();  // 初始化时间
 
-    // KEY_DOWN 唤醒：直接显示下一张（避免先显示当前张再切换的双刷新）
-    if (module_registry_consume_wake_next() && !s_image_list.empty()) {
-        gallery_next_image();
-        enter_deep_sleep();
-    }
+    // 按键唤醒（KEY_UP/KEY_DOWN）：不预显示任何图片。松手时由 check_btn 判定——
+    // 短按执行上一张/下一张，长按切换模块/开关 BLE，两种意图都只执行一次
+    bool wake_key_pending = (module_registry_peek_wake_key() != 0);
 
     // 如果有图片，显示第一张
     if (!s_image_list.empty()) {
@@ -507,6 +505,12 @@ int gallery_setup(void) {
           
                 enter_deep_sleep();
             }
+        } else if (!wake_key_pending) {
+            // 其他场景（上电 / 模块切换）：显示当前图片（基于已保存的 img_index）
+            if (s_current_image_index < 0 || s_current_image_index >= (int)s_image_list.size()) {
+                s_current_image_index = 0;
+            }
+            gallery_display_by_index(s_current_image_index);
         }
     } else {
         // 显示提示信息

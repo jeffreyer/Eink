@@ -43,10 +43,13 @@ void module_registry_mark_config_changed(const char* module_id);
 void module_registry_update(void);
 // 强制重新加载当前模块（unload + setup），用于手动刷新显示
 void module_registry_refresh_current(void);
-// KEY_DOWN 唤醒标记：主程序在 setup 检测到 GPIO 唤醒时标记，
-// 模块 setup 中可消费（如相册直接显示下一张，避免先显示当前张再切换的双刷新）
-void module_registry_mark_wake_next(void);
-bool module_registry_consume_wake_next(void);
+// 深度休眠按键唤醒标记：主程序在 setup 检测到 GPIO 唤醒时记录唤醒按键
+// （KEY_UP / KEY_DOWN），由 check_btn 判定：短按 → 上一项/下一项
+// （KEY_DOWN 唤醒短按后进入休眠）；长按 → 切换模块 / 开关 BLE
+void module_registry_mark_wake_key(uint8_t key);
+uint8_t module_registry_consume_wake_key(void);
+// 只读查询（不消费）：模块 setup 据此决定是否预显示（按键唤醒时相册不预显示）
+uint8_t module_registry_peek_wake_key(void);
 // 查询当前模块的深度休眠定时唤醒间隔（秒；0 = 不启用）
 uint32_t module_registry_get_wake_interval(void);
 

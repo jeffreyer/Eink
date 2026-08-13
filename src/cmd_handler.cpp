@@ -29,14 +29,6 @@ void check_cmd(){
       s_idle_timeout_ms=sec*1000;
       Serial.printf("Set sleep delay seconds: %d", sec);
     }
-    else if (command.startsWith("bat=")) {
-      String value = command.substring(4);
-      bool enabled = value.toInt() != 0;
-      save_config("chk_bat", enabled);
-      extern bool is_chk_bat;
-      is_chk_bat = enabled;
-      Serial.printf("Battery Check %s", enabled ? "enabled" : "disabled");
-    }
     else if (command.startsWith("bat?")) {
       int voltage = check_bat();
       Serial.printf("Battery Voltage: %d mV", voltage);

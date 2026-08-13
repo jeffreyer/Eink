@@ -70,7 +70,7 @@ static int s_current_dynamic_module = -1;
 static char s_pending_config_module[64] = {0};
 
 // KEY_DOWN 唤醒标记（"下一项"意图，由当前模块 setup 消费）
-static bool s_wake_next = false;
+static uint8_t s_wake_key = 0;  // 0=无, KEY_UP/KEY_DOWN
 
 static String json_escape(const char* value) {
   String s;
@@ -461,14 +461,18 @@ void module_registry_refresh_current(void) {
   reload_module_at(page_index);
 }
 
-void module_registry_mark_wake_next(void) {
-  s_wake_next = true;
+void module_registry_mark_wake_key(uint8_t key) {
+  s_wake_key = key;
 }
 
-bool module_registry_consume_wake_next(void) {
-  bool value = s_wake_next;
-  s_wake_next = false;
+uint8_t module_registry_consume_wake_key(void) {
+  uint8_t value = s_wake_key;
+  s_wake_key = 0;
   return value;
+}
+
+uint8_t module_registry_peek_wake_key(void) {
+  return s_wake_key;
 }
 
 // 查询当前模块的深度休眠定时唤醒间隔（秒；0 = 不启用）

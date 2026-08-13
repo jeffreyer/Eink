@@ -24,21 +24,22 @@ enum ButtonStatus {
   BTN_NONE = 0,      // No action
   BTN_CLICK = 1,     // Short click (subpage switch)
   BTN_MODULE = 2,    // Long press - switch module
-  BTN_SLEEP = 3,     // Very long press - enter sleep
-  BTN_BLE = 4        // Long press - toggle BLE config
+  BTN_BLE = 3        // Long press - toggle BLE config
 };
 
 ButtonStatus btn_status = BTN_NONE;
 uint32_t tm_chk_bat=0;
 uint32_t key_up_hold=0,key_down_hold=0;
 bool key_up_triggered=false,key_down_triggered=false;
+// 休眠唤醒后长按切模块：等待 KEY_DOWN 释放再进入深度休眠
+// （按键还按着时不能直接休眠，低电平 GPIO 唤醒会立刻再次唤醒）
+static bool s_sleep_after_wake_switch = false;
 
 void main_load_config(){
   Preferences prefs;
   prefs.begin("bottle", true);
   page_index = prefs.getInt("page_index");
   s_idle_timeout_ms = prefs.getInt("sleep_sec",IDLE_TIMEOUT_DEFAULT)*1000;
-  is_chk_bat = prefs.getInt("chk_bat",0);
   prefs.end();
 }
 
@@ -129,14 +130,75 @@ void app_set_page(int32_t page, int32_t subpage) {
 }
 
 
+// KEY_UP 短按动作：消费唤醒意图（KEY_UP 唤醒短按后进入休眠）；
+// 模块"上一项"钩子（相册=上一张），无钩子则 subpage-1
+static void key_up_short_press_action() {
+  Serial.println("KEY_UP press detected");
+  if (ble_config_is_enabled()) {
+    return;
+  }
+  bool wake_short_press = (module_registry_consume_wake_key() == KEY_UP);
+  const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
+  if (current && current->subpage_prev) {
+    // 模块自定义"上一项"（如相册显示上一张）
+    current->subpage_prev();
+    Serial.println("KEY_UP: module prev action");
+  } else if (!wake_short_press && subpage_index > 0) {
+    subpage_index--;
+    Serial.printf("Subpage: %d\n", subpage_index);
+  }
+  if (wake_short_press) {
+    Serial.println("KEY_UP wake short press -> enter deep sleep");
+    enter_deep_sleep();
+  }
+  // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
+}
+
+// KEY_DOWN 短按动作：消费唤醒意图（KEY_DOWN 唤醒短按后进入休眠）；
+// 模块"下一项"钩子（相册=下一张），无钩子则 subpage+1
+static void key_down_short_press_action() {
+  Serial.println("KEY_DOWN press detected");
+  if (ble_config_is_enabled()) {
+    Serial.println("KEY_DOWN: ignored while BLE enabled");
+    return;
+  }
+  bool wake_short_press = (module_registry_consume_wake_key() == KEY_DOWN);
+  const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
+  if (current && current->subpage_next) {
+    // 模块自定义"下一项"（如相册显示下一张）
+    current->subpage_next();
+    Serial.println("KEY_DOWN: module next action");
+  } else if (!wake_short_press) {
+    subpage_index++;
+    Serial.printf("Subpage: %d\n", subpage_index);
+  }
+  if (wake_short_press) {
+    Serial.println("KEY_DOWN wake short press -> enter deep sleep");
+    enter_deep_sleep();
+  }
+  // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
+}
+
 void check_btn(){
   uint32_t now = millis();
+
+  // 深度休眠按键唤醒：若唤醒按键在轮询开始前已松开（setup 显示耗时较长），
+  // 补一次短按事件，避免按键事件丢失（若仍按住则由下方轮询正常判定长按）
+  uint8_t wake_key = module_registry_peek_wake_key();
+  if (wake_key != 0 && digitalRead(wake_key) != LOW) {
+    if (wake_key == KEY_DOWN) {
+      key_down_short_press_action();  // 内部消费 KEY_DOWN 唤醒意图并休眠
+    } else {
+      key_up_short_press_action();    // 内部消费 KEY_UP 唤醒意图并休眠
+    }
+  }
 
   if (digitalRead(KEY_UP) == LOW) {
     delay(100); // Debounce delay
     if (digitalRead(KEY_UP) == LOW && key_up_triggered==false) {
       if (key_up_hold>0) {
         uint32_t hold_duration = now - key_up_hold;
+        // 长按（3秒）：开关 BLE 配置（按住即触发，保持原行为）
         if (hold_duration >= 3000) {
           key_up_triggered=true;
           key_up_hold = 0;
@@ -153,20 +215,7 @@ void check_btn(){
     if (key_up_hold > 0 && key_up_triggered==false) {
       uint32_t hold_duration = now - key_up_hold;
       key_up_hold = 0;
-      Serial.println("KEY_UP press detected");
-
-      if (!ble_config_is_enabled()) {
-        const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
-        if (current && current->subpage_prev) {
-          // 模块自定义"上一项"（如相册显示上一张）
-          current->subpage_prev();
-          Serial.println("KEY_UP: module prev action");
-        } else if (subpage_index > 0) {
-          subpage_index--;
-          Serial.printf("Subpage: %d\n", subpage_index);
-        }
-        // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
-      }
+      key_up_short_press_action();
     }
     key_up_triggered=false;
   }
@@ -175,11 +224,12 @@ void check_btn(){
     if (digitalRead(KEY_DOWN) == LOW && key_down_triggered==false) {
       if (key_down_hold>0) {
         uint32_t hold_duration = now - key_down_hold;
+        // 长按（3秒）：切换下一个模块（按住即触发，与 KEY_UP 一致）
         if (hold_duration >= 3000) {
           key_down_triggered=true;
           key_down_hold = 0;
           Serial.println("KEY_DOWN long press detected");
-          btn_status = BTN_SLEEP;
+          btn_status = BTN_MODULE;
         }
       }
       else {
@@ -191,20 +241,7 @@ void check_btn(){
     if (key_down_hold > 0 && key_down_triggered==false) {
       uint32_t hold_duration = now - key_down_hold;
       key_down_hold = 0;
-      Serial.println("KEY_DOWN press detected");
-
-      if (!ble_config_is_enabled()) {
-        const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
-        if (current && current->subpage_next) {
-          // 模块自定义"下一项"（如相册显示下一张）
-          current->subpage_next();
-          Serial.println("KEY_DOWN: module next action");
-        } else {
-          subpage_index++;
-          Serial.printf("Subpage: %d\n", subpage_index);
-        }
-        // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
-      }
+      key_down_short_press_action();
     }
     key_down_triggered=false;
   }
@@ -222,6 +259,9 @@ void check_btn(){
       return;
     }
     btn_status = BTN_NONE;
+    // 长按已消费唤醒意图：切换模块时清除，避免残留标记影响下次按键
+    uint8_t wake_key = module_registry_consume_wake_key();
+    bool wake_switch = (wake_key == KEY_DOWN);
     const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
     if (current && current->unload) {
       current->unload();
@@ -237,10 +277,18 @@ void check_btn(){
     if (next && next->setup) {
       next->setup();
     }
+    main_save_config();
+    if (wake_switch) {
+      // 休眠唤醒后的长按：切换完成后等按键释放再进入深度休眠
+      s_sleep_after_wake_switch = true;
+      Serial.println("KEY_DOWN wake long press: module switched, sleep after key release");
+    }
 
   }
   else if (btn_status == BTN_BLE){
     btn_status = BTN_NONE;
+    // 长按已消费唤醒意图：进入 BLE 时清除，避免残留标记影响下次按键
+    module_registry_consume_wake_key();
     ble_config_toggle();
     if (!ble_config_is_enabled()){ //退出蓝牙后重新启动模块
 
@@ -253,11 +301,6 @@ void check_btn(){
         ret = current->setup();
       }
     }
-  }
-  else if (btn_status == BTN_SLEEP){
-    // Sleep action - save config and enter deep sleep
-    main_save_config();
-    enter_deep_sleep();
   }
 }
 
@@ -293,19 +336,26 @@ void setup() {
 
   main_load_config();
 
-  if (is_chk_bat)
-    check_battery_init();
+  check_battery_init();
 
   module_registry_init();
 
   page_index = module_registry_normalize_index(page_index);
 
-  // KEY_DOWN 唤醒（深度休眠 GPIO 唤醒）：标记"下一项"，由当前模块 setup 消费
-  // （相册直接显示下一张；其他模块忽略该标记，保持原唤醒行为）
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO &&
-      (esp_sleep_get_gpio_wakeup_status() & (1ULL << KEY_DOWN))) {
-    module_registry_mark_wake_next();
-    Serial.println("Woke by KEY_DOWN -> mark wake-next");
+  // 深度休眠按键唤醒：记录唤醒按键，由 check_btn 判定短按/长按
+  // （短按 → 上一项/下一项，KEY_DOWN 唤醒短按后休眠；长按 → 切换模块/开关 BLE）
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
+    uint64_t gpio_status = esp_sleep_get_gpio_wakeup_status();
+    if (gpio_status & (1ULL << KEY_DOWN)) {
+      module_registry_mark_wake_key(KEY_DOWN);
+      Serial.println("Woke by KEY_DOWN");
+    } else if (gpio_status & (1ULL << KEY_UP)) {
+      module_registry_mark_wake_key(KEY_UP);
+      Serial.println("Woke by KEY_UP");
+    }
+  } else {
+    // 非按键唤醒：清除可能残留的标记，避免误触发"唤醒短按"
+    module_registry_consume_wake_key();
   }
 
   const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
@@ -313,8 +363,6 @@ void setup() {
     Serial.println("Setting up module: " + String(module->name));
     module->setup();
   }
-  // 当前模块未消费 KEY_DOWN 唤醒标记则丢弃，避免切换模块后误触发"下一项"
-  module_registry_consume_wake_next();
 
   // 初始显示已完成：之后 sys.wake_source() 返回 0，
   // BLE"刷新显示"等显式重载时 Lua setup 会正常重绘
@@ -330,14 +378,20 @@ void loop() {
 
   check_btn();
 
-  if (is_chk_bat && millis() - tm_chk_bat > 3000) { // 每30秒检查一次电池状态
-    tm_chk_bat = millis();
-    check_bat();
-    // if (is_low_bat) {
-    //   draw_low_battery_hint();
-    //   enter_deep_sleep();
-    // }
+  // 休眠唤醒长按切模块：KEY_DOWN 释放后进入深度休眠
+  if (s_sleep_after_wake_switch && digitalRead(KEY_DOWN) != LOW) {
+    s_sleep_after_wake_switch = false;
+    enter_deep_sleep();
   }
+
+  // if (millis() - tm_chk_bat > 30000) { // 每30秒检查一次电池状态
+  //   tm_chk_bat = millis();
+  //   check_bat();
+  //   // if (is_low_bat) {
+  //   //   draw_low_battery_hint();
+  //   //   enter_deep_sleep();
+  //   // }
+  // }
 
   check_cmd();
 

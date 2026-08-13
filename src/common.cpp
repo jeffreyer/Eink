@@ -5,7 +5,6 @@
 #include "common.h"
 
 int32_t page_index=0,subpage_index=0;
-bool is_chk_bat=false;
 
 int load_config(String key){
   Preferences prefs;
