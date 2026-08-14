@@ -493,17 +493,15 @@ int gallery_setup(void) {
         esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
         if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
             
-            // 如果是循环模式，显示完第一张后立即进入休眠
+            // 如果是循环模式，显示下一张；休眠由 main.cpp 定时唤醒检查统一处理
             if (s_display_mode == 1) {
-                Serial.printf("Gallery: Cycle mode enabled, entering sleep after first display\n");
+                Serial.printf("Gallery: Cycle mode enabled, displaying next image\n");
                 s_current_image_index++;
                 if (s_current_image_index >= (int)s_image_list.size()) {
                     s_current_image_index = 0;  // 循环到第一张
                 }
                 gallery_display_by_index(s_current_image_index);
                 save_config_ns("gallery", "img_index", s_current_image_index);
-          
-                enter_deep_sleep();
             }
         } else if (!wake_key_pending) {
             // 其他场景（上电 / 模块切换）：显示当前图片（基于已保存的 img_index）

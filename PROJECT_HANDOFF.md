@@ -485,7 +485,21 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
   - 相册：循环播放模式下按 `cycle_interval`（分钟）定时唤醒切换
   - Lua 模块：通用实现读取模块配置 `refresh`（**小时**，如倒计时默认6小时；
     NVS 键名最长15字符，故配置键须 ≤15），
-    定时唤醒后 `setup()` 重绘（`sys.wake_source()==2`），按键唤醒则跳过重绘
+    定时唤醒后 `setup()` 重绘（`sys.wake_source()==2`），按键唤醒则跳过重绘；
+    定时唤醒重绘完成后 `main.cpp` **立即进入深度休眠**（不再等待空闲超时），
+    异步刷屏期间 MCU 直接休眠，30 秒后唤醒完成面板断电，再按模块周期继续休眠
+- **系统级异步刷屏（仅 INK6）**：JD7601 发完 0x12 刷新命令后由控制器内部完成刷屏，
+  MCU 无需等待 BUSY。`epdDisplayImage` 对**所有模块统一异步**：发完刷新命令立即返回
+  并置 RTC 标志 `s_refresh_pending`，不依赖任何模块特判。
+  - 若随后进入深度休眠：`enter_deep_sleep()` 检测到该标志只启用 30 秒定时唤醒
+    （`EPD_ASYNC_REFRESH_SLEEP_S`，禁用 GPIO 唤醒避免打断刷新）；30 秒后唤醒走
+    `setup()` 快路径：`epdFinishPowerOff()` 完成 Power OFF + 面板休眠，清标志后按
+    模块周期重新进入深度休眠。
+  - 若未休眠（实时交互 / BLE / 上电后待机）：主循环 `epdPanelPowerMaintain()` 在
+    `EPD_PANEL_POWEROFF_DELAY_MS`（3秒）后延迟断电面板。
+  - 连续绘制保护：新绘制开始时若上一帧刷新仍在进行，`epdDisplayImage` 先等待
+    BUSY 完成再重置面板，避免打断刷新。
+  4色屏保持同步刷屏（沿用旧驱动）。
 
 **时间与时区**：
 - 时间戳（UTC）由 BLE `sync_time` 同步，`TimeCalibration` 存 RTC 内存（深睡保持）

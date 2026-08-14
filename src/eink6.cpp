@@ -50,6 +50,44 @@ static const uint32_t BUSY_TIMEOUT_INIT_MS = 10000;
 static const uint32_t BUSY_TIMEOUT_POWER_MS = 10000;
 static const uint32_t BUSY_TIMEOUT_REFRESH_MS = 40000;
 
+// 系统级异步刷屏：
+// RTC 标记：面板刷新进行中（跨深度休眠保留），唤醒后需完成 Power OFF + 面板休眠
+RTC_DATA_ATTR static bool s_refresh_pending = false;
+static uint32_t s_refresh_start_ms = 0;
+
+bool epdIsRefreshPending(void) {
+  return s_refresh_pending;
+}
+
+void epdClearRefreshPending(void) {
+  s_refresh_pending = false;
+}
+
+// 异步刷新唤醒后：刷新已完成，关闭面板电源并进入面板深度休眠
+void epdFinishPowerOff() {
+  Serial.println("[EPD] stage: finish power off (async refresh)");
+  // 保险：若刷新仍未结束（超长刷新），等待其完成
+  epdWaitBusyStage("Refresh done", BUSY_TIMEOUT_REFRESH_MS);
+  epdWriteCommand(0x02);  // Power OFF
+  epdWriteData(0x00);
+  epdWaitBusyStage("Power OFF", BUSY_TIMEOUT_POWER_MS);
+  delay(20);
+  epdEnterDeepSleep();
+  Serial.println("[EPD] panel powered off and in deep sleep");
+}
+
+// 主循环兜底：异步刷新后若系统未进入休眠（实时交互 / BLE 等），延迟断电面板
+void epdPanelPowerMaintain(void) {
+  if (!s_refresh_pending) {
+    return;
+  }
+  if (millis() - s_refresh_start_ms >= EPD_PANEL_POWEROFF_DELAY_MS) {
+    Serial.println("[EPD] panel power off (no sleep after refresh)");
+    epdFinishPowerOff();
+    s_refresh_pending = false;
+  }
+}
+
 
 static inline void epdSelect() {
     digitalWrite(PIN_EPD_CS, LOW);
@@ -365,6 +403,14 @@ void epdDisplayColorBars() {
 
 void epdDisplayImage(const unsigned char* imgData, uint32_t dataLen) {
     Serial.println("[EPD] stage: write frame (image)");
+
+    // 同步点：上一帧异步刷新若仍在进行，等待其完成再开始新绘制，避免打断刷新
+    if (s_refresh_pending) {
+        Serial.println("[EPD] sync: waiting previous refresh to finish");
+        epdWaitBusyStage("prev refresh", BUSY_TIMEOUT_REFRESH_MS);
+        s_refresh_pending = false;
+    }
+
     epdReset();
     epdInitJD7601();
 
@@ -394,15 +440,12 @@ void epdDisplayImage(const unsigned char* imgData, uint32_t dataLen) {
     epdWriteCommand(0x12);
     epdWriteData(0x00);
     delay(10);
-    epdWaitBusyStage("Display Refresh", BUSY_TIMEOUT_REFRESH_MS);
 
-    Serial.println("[EPD] stage: power off");
-    epdWriteCommand(0x02);
-    epdWriteData(0x00);
-    epdWaitBusyStage("Power OFF", BUSY_TIMEOUT_POWER_MS);
-    delay(20);
-
-    epdEnterDeepSleep();
+    // 系统级异步：发完刷新命令立即返回，MCU 可直接进入深度休眠，
+    // 面板断电由 enter_deep_sleep() 30秒快路径或主循环 epdPanelPowerMaintain() 完成
+    s_refresh_pending = true;
+    s_refresh_start_ms = millis();
+    Serial.println("[EPD] async refresh started");
 }
 
 // ====================== 显示函数结束 ======================

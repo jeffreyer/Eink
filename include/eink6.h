@@ -30,11 +30,24 @@ static const uint32_t EPD_FRAME_BYTES = (EPD_WIDTH * EPD_HEIGHT) / 2; // 240*240
 
 #define ALLSCREEN_BYTES EPD_FRAME_BYTES
 
+// 系统级异步刷屏：epdDisplayImage 发完 0x12 刷新命令后立即返回（不等待 BUSY/不断电）。
+// 若随后进入深度休眠，等 EPD_ASYNC_REFRESH_SLEEP_S 秒后唤醒完成面板断电；
+// 若未休眠（实时交互/BLE），由主循环 epdPanelPowerMaintain() 延迟断电兜底
+#define EPD_ASYNC_REFRESH_SLEEP_S 30
+#define EPD_PANEL_POWEROFF_DELAY_MS 3000
+
 int init_eink6();
 int gui_drawtext(const char* str);
 void epdDisplaySolid(EpdColorByte color);
 void epdDisplayImage(const unsigned char* imgData, uint32_t dataLen);
 void epdEnterDeepSleep();
+// 面板刷新是否仍在进行（RTC 标志，跨深度休眠保留）
+bool epdIsRefreshPending(void);
+void epdClearRefreshPending(void);
+// 唤醒后完成面板断电：等待刷新结束 → Power OFF → 面板进入深度休眠
+void epdFinishPowerOff(void);
+// 主循环调用：异步刷新后若系统未进入休眠，延迟断电面板
+void epdPanelPowerMaintain(void);
 void epdReset();
 void epdTryFixBusyPolarity();
 void epdInitJD7601();

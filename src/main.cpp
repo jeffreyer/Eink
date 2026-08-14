@@ -342,6 +342,17 @@ void setup() {
 
   page_index = module_registry_normalize_index(page_index);
 
+  #ifdef INK6
+  // 异步刷新唤醒：30 秒前休眠时面板仍在刷新，本次唤醒仅完成面板断电后继续休眠
+  // （不重绘屏幕，避免打断刷新）
+  if (epdIsRefreshPending()) {
+    Serial.println("[EPD] async refresh wake: finishing power off");
+    epdFinishPowerOff();
+    epdClearRefreshPending();
+    enter_deep_sleep();
+  }
+  #endif
+
   // 深度休眠按键唤醒：记录唤醒按键，由 check_btn 判定短按/长按
   // （短按 → 上一项/下一项，KEY_DOWN 唤醒短按后休眠；长按 → 切换模块/开关 BLE）
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
@@ -364,6 +375,13 @@ void setup() {
     module->setup();
   }
 
+  // 定时唤醒：模块已重绘，立即进入深度休眠节省电量。
+  // 异步刷屏期间 MCU 直接休眠，30 秒后唤醒完成面板断电，再按模块周期继续休眠
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("Timer wake: module redrawn, entering deep sleep");
+    enter_deep_sleep();
+  }
+
   // 初始显示已完成：之后 sys.wake_source() 返回 0，
   // BLE"刷新显示"等显式重载时 Lua setup 会正常重绘
   lua_hardware_mark_boot_wake_consumed();
@@ -377,6 +395,11 @@ void setup() {
 void loop() {
 
   check_btn();
+
+  #ifdef INK6
+  // 面板断电兜底：异步刷新后若系统未进入休眠（实时交互/BLE），延迟断电面板
+  epdPanelPowerMaintain();
+  #endif
 
   // 休眠唤醒长按切模块：KEY_DOWN 释放后进入深度休眠
   if (s_sleep_after_wake_switch && digitalRead(KEY_DOWN) != LOW) {
