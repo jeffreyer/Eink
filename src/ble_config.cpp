@@ -78,6 +78,10 @@ static String s_pending_cmd;
 static bool s_has_pending_cmd = false;
 static bool s_client_connected = false;
 bool s_ble_enabled = false;
+// 本次 BLE 会话是否发生过连接（连接过又在会话结束/断开 → 立即休眠省电）
+static bool s_ble_had_connection = false;
+// 连接已结束且应休眠（重新连接时清除）
+static bool s_ble_sleep_after_disconnect = false;
 static bool s_ble_initialized = false;
 
 // 安全管理器
@@ -1207,6 +1211,8 @@ class ConfigServerCallbacks : public NimBLEServerCallbacks {
     void onConnect(NimBLEServer* server, NimBLEConnInfo& connInfo) {
         (void)server;
         s_client_connected = true;
+        s_ble_had_connection = true;
+        s_ble_sleep_after_disconnect = false;  // 重新连接，取消休眠标记
         // 连接时立即发送状态
         String status = status_json();
         s_status_char->setValue(status.c_str());
@@ -1218,6 +1224,10 @@ class ConfigServerCallbacks : public NimBLEServerCallbacks {
         s_client_connected = false;
         // 断开连接时重置认证状态
         deviceSecurity.resetAuth();
+        // 连接过又断开：标记"断开后立即休眠"，由主循环执行（节省电量）
+        if (s_ble_had_connection) {
+            s_ble_sleep_after_disconnect = true;
+        }
         if (s_ble_enabled) {
             NimBLEDevice::getAdvertising()->start();
         }
@@ -1330,6 +1340,10 @@ void ble_config_init(void) {
         Serial.println("BLE: Already enabled, skipping");
         return;
     }
+
+    // 新会话：重置连接状态跟踪
+    s_ble_had_connection = false;
+    s_ble_sleep_after_disconnect = false;
 
     // 第一次初始化：创建BLE栈和服务
     if (!s_ble_initialized) {
@@ -1456,6 +1470,11 @@ void ble_config_stop(void) {
     s_client_connected = false;
     s_ble_enabled = false;
     s_ble_initialized = false; // 标记为未初始化，下次需要重新初始化
+    // 会话结束：若本次连接过，标记"断开后立即休眠"（由主循环执行）
+    // if (s_ble_had_connection) {  //不判断有没有连接，直接标记断开后休眠
+        s_ble_sleep_after_disconnect = true;
+    // }
+    s_ble_had_connection = false;
 
     Serial.println("BLE: BLE stopped and deinitialized");
 }
@@ -1478,6 +1497,11 @@ void ble_config_publish_status(void) {
 
 bool ble_config_is_enabled(void) {
     return s_ble_enabled;
+}
+
+// 蓝牙会话结束（连接过并已断开/退出）且无待处理命令 → 应立即休眠
+bool ble_config_should_sleep_after_disconnect(void) {
+    return s_ble_sleep_after_disconnect && !s_has_pending_cmd;
 }
 
 void ble_config_toggle(void) {

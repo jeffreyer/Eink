@@ -420,6 +420,14 @@ void loop() {
 
   ble_config_update();
 
+  // 蓝牙会话结束（连接过并已断开/退出）→ 立即休眠，不再等待空闲超时
+  if (ble_config_should_sleep_after_disconnect()) {
+    Serial.println("BLE: session ended, entering deep sleep");
+    ble_config_stop();  // 若仍在广播，停止 BLE 栈
+    digitalWrite(BLE_LIGHT, HIGH);
+    enter_deep_sleep();
+  }
+
   sleep_manager_update();
 
   if (ble_config_is_enabled()) {

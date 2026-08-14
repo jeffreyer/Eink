@@ -480,6 +480,10 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
 - 深度休眠：定时器唤醒
 - 配置：30秒~30分钟，或永不休眠
 - 自动保存配置到NVS
+- **BLE 会话结束立即休眠**：本次 BLE 会话发生过连接后，无论长按 KEY_UP 退出
+  还是小程序端断开，`ble_config_should_sleep_after_disconnect()` 返回真，主循环
+  立即停止 BLE 并进入深度休眠（不再等待空闲超时）；重新连接会清除该标记。
+  未连接过的 BLE 会话按原空闲超时逻辑休眠。
 - **模块定时唤醒**：`module_descriptor_t` 的 `wake_interval` 钩子返回秒（0=不启用），
   `enter_deep_sleep()` 按当前模块配置 `esp_sleep_enable_timer_wakeup`
   ⚠️ `wake_interval` 可能被 30 秒断电快路径在模块 `setup` **之前**查询，
