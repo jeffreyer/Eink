@@ -482,6 +482,8 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
 - 自动保存配置到NVS
 - **模块定时唤醒**：`module_descriptor_t` 的 `wake_interval` 钩子返回秒（0=不启用），
   `enter_deep_sleep()` 按当前模块配置 `esp_sleep_enable_timer_wakeup`
+  ⚠️ `wake_interval` 可能被 30 秒断电快路径在模块 `setup` **之前**查询，
+  实现必须独立于模块运行时状态（如直接读 NVS 配置，参考相册/Lua 的实现）
   - 相册：循环播放模式下按 `cycle_interval`（分钟）定时唤醒切换
   - Lua 模块：通用实现读取模块配置 `refresh`（**小时**，如倒计时默认6小时；
     NVS 键名最长15字符，故配置键须 ≤15），

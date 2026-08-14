@@ -234,6 +234,17 @@ int gallery_prev_image(void) {
 
 // 模块定时唤醒钩子：循环播放时按循环间隔定时唤醒切换，否则不启用定时唤醒
 int gallery_wake_interval(void) {
+    // 30 秒断电快路径在模块 setup 前查询：静态配置尚未加载，直接从 NVS 读取。
+    // 此时必然刚完成一次图片刷新（存在图片），因此不检查图片列表
+    if (!s_initialized) {
+        int display_mode = load_config_ns("gallery", "display_mode");
+        int cycle_interval = load_config_ns("gallery", "cycle_interval");
+        if (cycle_interval < 1 || cycle_interval > 1440) {
+            cycle_interval = 60;
+        }
+        return display_mode == 1 ? cycle_interval * 60 : 0;
+    }
+
     if (s_display_mode == 1 && !s_image_list.empty()) {
         return s_cycle_interval * 60;  // 分钟 → 秒
     }
