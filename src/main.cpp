@@ -407,15 +407,6 @@ void loop() {
     enter_deep_sleep();
   }
 
-  // if (millis() - tm_chk_bat > 30000) { // 每30秒检查一次电池状态
-  //   tm_chk_bat = millis();
-  //   check_bat();
-  //   // if (is_low_bat) {
-  //   //   draw_low_battery_hint();
-  //   //   enter_deep_sleep();
-  //   // }
-  // }
-
   check_cmd();
 
   ble_config_update();

@@ -11,8 +11,6 @@
 
 #define ADC_CHANNEL ADC_CHANNEL_0   // GPIO0
 
-static bool is_low_bat=false;
-
 int check_bat();
 
 int check_battery_init();
