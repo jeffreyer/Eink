@@ -39,7 +39,6 @@ void main_load_config(){
   Preferences prefs;
   prefs.begin("bottle", true);
   page_index = prefs.getInt("page_index");
-  s_idle_timeout_ms = prefs.getInt("sleep_sec",IDLE_TIMEOUT_DEFAULT)*1000;
   prefs.end();
 }
 
@@ -151,7 +150,6 @@ static void key_up_short_press_action() {
     Serial.println("KEY_UP wake short press -> enter deep sleep");
     enter_deep_sleep();
   }
-  // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
 }
 
 // KEY_DOWN 短按动作：消费唤醒意图（KEY_DOWN 唤醒短按后进入休眠）；
@@ -176,7 +174,6 @@ static void key_down_short_press_action() {
     Serial.println("KEY_DOWN wake short press -> enter deep sleep");
     enter_deep_sleep();
   }
-  // sleep_manager_reset_idle_timer();  // 有按键活动，推迟休眠便于查看
 }
 
 void check_btn(){
@@ -290,17 +287,8 @@ void check_btn(){
     // 长按已消费唤醒意图：进入 BLE 时清除，避免残留标记影响下次按键
     module_registry_consume_wake_key();
     ble_config_toggle();
-    if (!ble_config_is_enabled()){ //退出蓝牙后重新启动模块
-
-      const module_descriptor_t* current = module_registry_get((uint8_t)page_index);
-      int ret;
-      if (current && current->unload) {
-        ret = current->unload();
-      }
-      if (current && current->setup) {
-        ret = current->setup();
-      }
-    }
+    // 统一模型：BLE 退出后立即休眠（见 loop 中 ble_config_should_sleep_after_disconnect），
+    // 不重绘屏幕；新配置在下次唤醒的 setup 中生效
   }
 }
 
@@ -353,8 +341,10 @@ void setup() {
   }
   #endif
 
-  // 深度休眠按键唤醒：记录唤醒按键，由 check_btn 判定短按/长按
-  // （短按 → 上一项/下一项，KEY_DOWN 唤醒短按后休眠；长按 → 切换模块/开关 BLE）
+  // 统一休眠策略：
+  // - 按键唤醒：记录唤醒按键，跳过模块 setup 绘制，由 check_btn 判定短按/长按
+  //   （短按 → 上一项/下一项后休眠；长按 → 切换模块后休眠 / 开关 BLE 保持唤醒）
+  // - 上电/定时唤醒：模块 setup 绘制当前内容，执行完立即进入深度休眠
   if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
     uint64_t gpio_status = esp_sleep_get_gpio_wakeup_status();
     if (gpio_status & (1ULL << KEY_DOWN)) {
@@ -367,29 +357,17 @@ void setup() {
   } else {
     // 非按键唤醒：清除可能残留的标记，避免误触发"唤醒短按"
     module_registry_consume_wake_key();
-  }
 
-  const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
-  if (module && module->setup) {
-    Serial.println("Setting up module: " + String(module->name));
-    module->setup();
-  }
+    const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
+    if (module && module->setup) {
+      Serial.println("Setting up module: " + String(module->name));
+      module->setup();
+    }
 
-  // 定时唤醒：模块已重绘，立即进入深度休眠节省电量。
-  // 异步刷屏期间 MCU 直接休眠，30 秒后唤醒完成面板断电，再按模块周期继续休眠
-  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
-    Serial.println("Timer wake: module redrawn, entering deep sleep");
+    // 非按键唤醒：逻辑执行完毕，立即休眠（BLE 只能通过长按 KEY_UP 进入）
+    Serial.println("Non-key wake: module drawn, entering deep sleep");
     enter_deep_sleep();
   }
-
-  // 初始显示已完成：之后 sys.wake_source() 返回 0，
-  // BLE"刷新显示"等显式重载时 Lua setup 会正常重绘
-  lua_hardware_mark_boot_wake_consumed();
-
-  sleep_manager_init();
-
-  sleep_manager_start();
-
 }
 
 void loop() {
@@ -419,21 +397,12 @@ void loop() {
     enter_deep_sleep();
   }
 
-  sleep_manager_update();
-
   if (ble_config_is_enabled()) {
     delay(30);
     return;
   }
 
-  // 若当前模块配置在 BLE 会话中被修改，重新加载模块使新配置生效
-  module_registry_update();
-
-  const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
-  if (module && module->loop) {
-    module->loop();
-  }
-
+  // 非 BLE 模式仅存在于按键唤醒判定期间（随后必然休眠）。
+  // 模块不再有常驻 loop：周期刷新统一由深度休眠定时唤醒 → setup 驱动
   delay(10);
-
 }

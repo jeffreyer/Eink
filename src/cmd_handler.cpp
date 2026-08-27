@@ -25,9 +25,7 @@ void check_cmd(){
     if (command.startsWith("sleep=")) {
       int sec=command.substring(6).toInt();
       save_config("sleep_sec",sec);
-      extern uint32_t s_idle_timeout_ms;
-      s_idle_timeout_ms=sec*1000;
-      Serial.printf("Set sleep delay seconds: %d", sec);
+      Serial.printf("Saved sleep_sec=%d (no longer controls sleep behavior)", sec);
     }
     else if (command.startsWith("bat?")) {
       int voltage = check_bat();

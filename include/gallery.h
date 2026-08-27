@@ -6,7 +6,6 @@
 
 // 相册模块接口
 int gallery_setup(void);
-int gallery_loop(void);
 int gallery_unload(void);
 
 // 图片信息结构
@@ -55,9 +54,6 @@ int gallery_get_display_mode();
 
 // 获取循环间隔
 int gallery_get_cycle_interval();
-
-// 检查是否需要循环切换
-bool gallery_should_cycle();
 
 // 执行循环切换
 void gallery_do_cycle();

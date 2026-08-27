@@ -75,13 +75,16 @@
 
 | 按键 | 短按 | 长按(3秒) |
 |------|------|------|
-| KEY_UP | 模块"上一项"钩子（`subpage_prev`，相册=上一张）；无钩子则 subpage-1 | 开关 BLE 配置 |
-| KEY_DOWN | 模块"下一项"钩子（`subpage_next`，相册=下一张）；无钩子则 subpage+1 | 切换下一个启用模块（`module_registry_next_enabled`，按住3秒即触发，并保存当前模块） |
+| KEY_UP | 模块"上一项"钩子（`subpage_prev`，相册=上一张、名言=上一条）；无钩子则 subpage-1 | 开关 BLE 配置 |
+| KEY_DOWN | 模块"下一项"钩子（`subpage_next`，相册=下一张、名言=下一条）；无钩子则 subpage+1 | 切换下一个启用模块（`module_registry_next_enabled`，按住3秒即触发，并保存当前模块） |
 
 模块可在 `module_descriptor_t` 注册 `subpage_next/subpage_prev` 自定义按键行为
-（`gallery` 注册为上一张/下一张，其他模块默认 subpage ±1，互不影响）。
-深度休眠被 KEY_DOWN 唤醒时，`setup()` 检测 GPIO 唤醒原因并标记"下一项"，
-当前模块 `setup` 消费后直接显示（相册在 `gallery_setup` 内消费，只刷新一次）。
+（`gallery` 注册为上一张/下一张；**Lua 模块在脚本中定义同名函数即可注册**，
+如名言 `subpage_next/subpage_prev`；其他模块默认 subpage ±1，互不影响）。
+统一休眠模型下，按键唤醒**不执行模块 setup**：系统记录唤醒按键，由 `check_btn`
+判定短按/长按后执行对应动作并休眠（短按 → 上一项/下一项钩子，长按 → 切模块/开 BLE）。
+Lua 按键钩子被调用时若模块未加载（按键唤醒跳过了 setup），系统会**只加载脚本、
+不执行 setup 绘制**，再由钩子自行绘制。
 
 ### BLE 状态字段
 
@@ -125,6 +128,8 @@ include/
 
 data/
 ├── gallery.cfg           # 相册配置定义（display_mode, cycle_interval；rotation 已移至模块页全局配置）
+├── quotes.cfg            # 名言警句配置定义（interval 切换间隔，分钟）
+├── quotes.lua            # 名言警句模块（内置 431 条国内外名言）
 ├── countdown.lua         # 纪念日倒计时模块
 └── fonts/                # GB2312 全量点阵字库（16/24px + 映射表）
 
@@ -461,39 +466,64 @@ BLE 通知做了节流与退避（`notify()` 失败延时重试、成功后 2ms 
   - Lua 模块（倒计时等）：`display_prepare_canvas()` 统一 `Paint_SetRotate`，
     重绘（退出 BLE / 刷新显示）后整屏生效
 - 循环播放：可配置间隔（1分钟~24小时）
+- 空态提示：相册无图片时显示"请上传图片：长按上键等待蓝色指示灯亮，通过小程序
+  '幻彩抽屉'连接设备上传图片。"（size 4 24x24 中文字库，UTF-8 安全自动换行居中，
+  随全局显示方向旋转；有图后正常显示图片）
 - 按键切换：KEY_DOWN 下一张 / KEY_UP 上一张（模块钩子 `subpage_next/subpage_prev`，
-  深度休眠按键唤醒时相册**不预显示**（`module_registry_peek_wake_key` 只读查询）。
-  setup 显示耗时较长，唤醒按键可能在轮询前已松开——`check_btn` 会补发一次短按事件：
+  按键唤醒跳过 setup，钩子内部懒初始化图片列表后直接切换）。
+  `check_btn` 会补发一次短按事件（唤醒键在轮询前已松开时）：
   KEY_DOWN 短按 → 下一张并进入深度休眠；KEY_UP 短按 → 上一张并进入深度休眠；
   长按 KEY_DOWN（3秒）→ 只触发"切换下一个模块"；长按 KEY_UP → 开关 BLE，
   均不执行短按动作。休眠唤醒长按切模块后，等 KEY_DOWN 释放再进入深度休眠
   （`s_sleep_after_wake_switch`，避免按住时立即休眠导致低电平再次唤醒）
-- 进入相册模块（上电 / 按键唤醒 / 从其他模块切换）：`gallery_setup` 兜底显示
-  已保存 `img_index` 对应的当前图片；定时唤醒（循环模式）才显示下一张
+- 进入相册模块（上电 / 定时唤醒 / 从其他模块切换）：`gallery_setup` 显示
+  "当前应显示的内容"——循环模式每次绘制下一张，固定模式显示已保存 `img_index`
+  对应图片；按键唤醒不经 setup，由按键钩子直接切换
 - 限制：仅MiniEink设备支持
 
 **配置项** (`data/gallery.cfg`):
 JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（循环间隔）。
 显示方向不再出现在相册配置页，改由模块页全局设置。
 
+#### 名言警句模块 (quotes.lua)
+- 内置 431 条国内外名言警句（中国古代/唐诗宋词/近现代/外国哲理中文/英文原句），
+  全部字符经 GB2312 字库映射校验（无缺字）
+- 内存优化：数据用**扁平数组**（每条 "名言\t作者" 单字符串对象），避免 431 个
+  嵌套小表占用大量 Lua 堆；脚本由设备端**流式加载**（`luaL_loadfile`，不再拼进
+  C++ String），修复 ESP32-C3 上 "not enough memory" 问题
+- 布局：红色标题"名言警句" + 分隔线 + 自动换行居中正文（16x16）+ 右下红色作者；
+  中英文混排按显示宽度换行（英文尽量整词断行），超出行数自动省略
+- 切换间隔：`interval` 配置（分钟），选项与相册循环间隔一致（1分钟~24小时，默认1小时）
+- 显示顺序：`order` 配置（0=按顺序，1=随机，默认按顺序）
+- 按键切换：KEY_DOWN 短按下一条 / KEY_UP 短按上一条（Lua `subpage_next/subpage_prev`
+  钩子，首尾回绕；**连续按键可逐步切换**——当前索引经 `sys.set_state/get_state`
+  存入 RTC 内存，深度休眠保持、掉电清零；切换后立即休眠，下次定时唤醒按槽位刷新）
+- 轮换策略：按顺序模式按 `当前时刻/切换间隔` 取槽位确定条目（纯时间推导，
+  深度休眠唤醒后稳定轮换，无需模块持久化状态）；随机模式以当前时刻为随机种子，
+  每次唤醒/切换随机取一条
+- 休眠定时唤醒：见"休眠管理 → 模块定时唤醒"（`interval` 分钟级）
+
 #### 休眠管理 (sleep_manager.cpp)
-- 深度休眠：定时器唤醒
-- 配置：30秒~30分钟，或永不休眠
-- 自动保存配置到NVS
-- **BLE 会话结束立即休眠**：本次 BLE 会话发生过连接后，无论长按 KEY_UP 退出
-  还是小程序端断开，`ble_config_should_sleep_after_disconnect()` 返回真，主循环
-  立即停止 BLE 并进入深度休眠（不再等待空闲超时）；重新连接会清除该标记。
-  未连接过的 BLE 会话按原空闲超时逻辑休眠。
+- **统一休眠模型**：任何逻辑执行完立即进入深度休眠，只有 BLE 配置模式保持唤醒。
+  - 上电 / 定时唤醒：模块 `setup()` 绘制 → 立即 `enter_deep_sleep()`
+  - 按键唤醒：跳过 setup，由 `check_btn` 判定 → 短按动作/切模块后休眠，
+    长按 KEY_UP 进入 BLE 保持唤醒
+  - BLE 开启后 **60 秒无连接**：自动停止广播并休眠（`BLE_NO_CONNECT_TIMEOUT_MS`，
+    写死，不依赖配置；连接后取消计时，断开后仍走"会话结束立即休眠"）
+  - BLE 会话结束（长按 KEY_UP 退出 / 小程序断开）：立即休眠，不重绘屏幕，
+    新配置在下次唤醒的 `setup()` 中生效
+- 已移除：空闲超时（`sleep_sec` 仅存档，不再控制休眠）、模块常驻 `loop`、
+  Lua `sys.wake_source()`（模块 setup 一律绘制，按键唤醒由系统层跳过）
 - **模块定时唤醒**：`module_descriptor_t` 的 `wake_interval` 钩子返回秒（0=不启用），
   `enter_deep_sleep()` 按当前模块配置 `esp_sleep_enable_timer_wakeup`
   ⚠️ `wake_interval` 可能被 30 秒断电快路径在模块 `setup` **之前**查询，
   实现必须独立于模块运行时状态（如直接读 NVS 配置，参考相册/Lua 的实现）
   - 相册：循环播放模式下按 `cycle_interval`（分钟）定时唤醒切换
-  - Lua 模块：通用实现读取模块配置 `refresh`（**小时**，如倒计时默认6小时；
-    NVS 键名最长15字符，故配置键须 ≤15），
-    定时唤醒后 `setup()` 重绘（`sys.wake_source()==2`），按键唤醒则跳过重绘；
-    定时唤醒重绘完成后 `main.cpp` **立即进入深度休眠**（不再等待空闲超时），
-    异步刷屏期间 MCU 直接休眠，30 秒后唤醒完成面板断电，再按模块周期继续休眠
+  - Lua 模块：通用实现（`dynamic_lua_wake_interval`）统一读取模块配置 `interval`
+    （**分钟**，1~1440，名言/倒计时通用；NVS 键名最长15字符，故配置键须 ≤15），
+    `refresh`（小时）仅作旧版倒计时配置兼容（`interval` 未保存时回退），
+    定时唤醒后 `setup()` 重绘并立即休眠；异步刷屏期间 MCU 直接休眠，
+    30 秒后唤醒完成面板断电，再按模块周期继续休眠
 - **系统级异步刷屏（仅 INK6）**：JD7601 发完 0x12 刷新命令后由控制器内部完成刷屏，
   MCU 无需等待 BUSY。`epdDisplayImage` 对**所有模块统一异步**：发完刷新命令立即返回
   并置 RTC 标志 `s_refresh_pending`，不依赖任何模块特判。
@@ -539,7 +569,17 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
 - 配置入口：点击进入详细配置
 - 删除模块：卸载模块
 - **亮度设置**：仅非MiniEink设备显示（墨水屏无背光）
-- **休眠时间**：所有设备都支持
+- **休眠时间**：前端已按设备型号隐藏（`!isMiniEink`），MiniEink 不再展示；
+  Bottle 等设备仍保留并使用该配置
+
+#### 模块市场 (market页面)
+- 模块列表：云函数 `getModules` 拉取，支持分类/搜索/下拉刷新
+- ✅ **按硬件型号过滤**：模块 `supportedModels` 数组（如 `bottlev1`/`bottlev4`，
+  未声明或含 `通用` 表示所有设备可见）；连接设备后前端用 `deviceStatus.model`
+  （设备 `get_status` 返回的 `DEVICE_MODEL`，如 `Bottle-V1`/`Eink-V1`）归一化
+  （小写去分隔符）匹配过滤；未连接/未知型号时显示全部
+- 过滤后无可用模块时显示"当前设备暂无可用模块"
+- 下载：按 `deviceModel` 传给 `getModuleDetail`，优先型号专用代码，降级通用代码
 
 #### 设备连接 (device-connect页面)
 - BLE扫描：自动过滤 BottleLED/MiniEink 设备
@@ -648,8 +688,10 @@ cd /d/Projects/Eink
 ```
 
 **Flash 分区表** (`partitions.csv`，4MB Flash):
-- `nvs`(20KB) + `otadata`(8KB) + `app0`(1.125MB, ota_0) + `modules`(2.8125MB, SPIFFS)
+- `nvs`(20KB) + `otadata`(8KB) + `app0`(992KB, ota_0) + `modules`(2.96875MB, SPIFFS)
 - 已移除 `app1`/OTA 分区（固件 OTA 逻辑已全部注释），把空余空间全部并入 `modules` 分区
+- `app0` 按当前固件体积预留约 10% 余量（`0xF8000`=1015808B，当前 firmware.bin 921216B）；
+  后续固件若显著增大需同步复核 `partitions.csv`
 - ⚠️ 刷入新分区表后 SPIFFS 容量变化会触发格式化，需重新 `uploadfs` 上传 `data/` 目录
   （Lua 模块、字体、配置），否则设备上旧数据失效
 
@@ -821,7 +863,7 @@ grep -c "## " /d/Projects/Eink/docs/LUA_SCRIPT_GUIDE.md
 #### 2. 模块管理测试
 - [ ] 连接MiniEink设备
 - [ ] 模块页面**不应显示亮度设置**（墨水屏无背光）
-- [ ] 应该显示休眠时间设置
+- [ ] MiniEink 模块页**不应显示休眠时间**（Bottle 设备保留）
 - [ ] 点击任意模块进入配置页面
 - [ ] 配置页面应该正常加载（不转圈）
 
@@ -895,6 +937,7 @@ lib_deps =
 - [x] 优化相册页面刷新逻辑
 - [x] 统一进度条样式
 - [x] MiniEink设备UI优化
+- [x] 市场模块按设备型号过滤（supportedModels）
 - [x] 创建完整项目交接文档
 - [x] 创建Lua开发规范文档
 

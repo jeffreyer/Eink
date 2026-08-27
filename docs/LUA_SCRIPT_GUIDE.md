@@ -65,29 +65,11 @@ module-id.cfg          # 配置文件（可选，JSON格式）
 -- @description: 在墨水屏上显示大字时钟
 -- @id: clock-simple
 
--- 全局状态
-local last_minute = -1
-
 function setup()
     print("模块初始化")
     display.clear()
+    display.text(50, 90, "Hello", 3)
     display.show()
-end
-
-function loop()
-    local h, m, s = time.get()
-    
-    -- 每分钟刷新一次
-    if m ~= last_minute then
-        last_minute = m
-        
-        display.clear()
-        local time_str = string.format("%02d:%02d", h, m)
-        display.text(50, 80, time_str, 3)
-        display.show()
-    end
-    
-    time.delay(1000)
 end
 
 function unload()
@@ -100,14 +82,13 @@ end
 ### 标准三函数结构
 
 #### `setup()`
-- 模块加载时调用一次
-- 用于初始化状态、加载配置
-- 可选函数
+- 模块加载时调用一次，**负责绘制当前应显示的内容**
+- 在 `setup()` 中读取配置并绘制（上电 / 定时唤醒 / 切换模块 / 刷新显示 都会调用）
+- 必需函数
 
 #### `loop()`
-- 主循环，持续调用
-- 实现模块的主要逻辑
-- 必需函数
+- **当前固件不再调用 `loop()`**（统一休眠模型：任何逻辑执行完立即休眠）
+- 周期刷新请使用"深度休眠定时唤醒"（见下文），无需也不应编写 `loop()`
 
 #### `unload()`
 - 模块卸载时调用
@@ -134,14 +115,14 @@ end
     "desc": "选择时间显示格式"
   },
   {
-    "key": "refresh",
+    "key": "interval",
     "type": "slider",
     "label": "刷新间隔",
-    "min": 30,
-    "max": 3600,
-    "step": 30,
+    "min": 1,
+    "max": 1440,
+    "step": 1,
     "default": 60,
-    "desc": "屏幕刷新间隔（秒）"
+    "desc": "屏幕刷新间隔（分钟）"
   },
   {
     "key": "show_seconds",
@@ -178,7 +159,7 @@ end
 ```lua
 -- 读取配置（提供默认值）
 local format = CONFIG.time_format or "24h"
-local interval = CONFIG.refresh or 60
+local interval = CONFIG.interval or 60
 local message = CONFIG.message or "Hello"
 
 -- 正确处理布尔值
@@ -190,15 +171,49 @@ end
 
 #### 配置变更自动生效
 
-小程序端修改配置并写入 NVS 后，设备端会**自动重新加载当前模块**（依次调用
-`unload()` 和 `setup()`），`setup()` 中重新注入的 `CONFIG` 表即包含最新配置值。
-因此模块开发时只需遵循标准约定：
+小程序端修改配置并写入 NVS 后，配置在**下次唤醒的 `setup()`** 中生效
+（BLE 会话结束即休眠，不重绘；小程序"刷新显示"命令会立即重载模块）。
+`setup()` 中重新注入的 `CONFIG` 表即包含最新配置值。因此：
 
-- 在 `setup()` 中读取配置并初始化显示，无需自己监听配置变化；
-- 不要在 `loop()` 中缓存 `setup()` 读取的配置到全局变量后就不再更新，重载后
-  模块状态会重新初始化；
-- 配置变更发生在 BLE 配置模式期间，模块在退出 BLE 配置模式后才会重载，
-  避免每次修改都触发一次屏幕刷新。
+- 在 `setup()` 中读取配置并绘制，无需自己监听配置变化；
+- 每次 `setup()` 都会重新注入 `CONFIG`，模块状态随之重新初始化。
+
+#### 深度休眠定时唤醒
+
+设备**任何逻辑执行完立即进入深度休眠**（仅 BLE 配置模式保持唤醒）。Lua 模块
+在配置中声明唤醒周期后，设备按周期定时唤醒并重新执行 `setup()` 完成重绘：
+
+| 配置键 | 单位 | 说明 |
+|--------|------|------|
+| `interval` | 分钟（1~1440） | **统一唤醒键**，所有 Lua 模块通用（名言/倒计时等） |
+| `refresh` | 小时 | 仅旧版倒计时配置兼容（`interval` 未保存时回退，新模块不要使用） |
+
+- 两键均在模块自己的 NVS 命名空间读取，与 `CONFIG` 表同源，只需在 `.cfg` 里
+  定义 `interval`（键名 ≤15 字符），无需 C 端改动；
+- 按键唤醒由系统层处理（跳过 setup，直接执行按键动作），模块**无需**也不应
+  判断唤醒源；`setup()` 一律绘制当前应显示的内容；
+- `setup()` 绘制完成后，系统会立即再次进入深度休眠。
+
+#### 按键钩子（可选）
+
+模块可在脚本顶层定义以下函数，注册 KEY_UP/KEY_DOWN 短按行为：
+
+```lua
+-- KEY_DOWN 短按：显示下一条
+function subpage_next()
+    draw_entry(next_index)
+end
+
+-- KEY_UP 短按：显示上一条
+function subpage_prev()
+    draw_entry(prev_index)
+end
+```
+
+- 短按触发（含深度休眠按键唤醒场景），钩子内应自行调用 `display.show()`；
+- 按键唤醒时系统**跳过 `setup()` 绘制**，但调用钩子前会自动**只加载脚本**
+  （不执行 `setup()`），因此钩子可直接使用顶层数据表和辅助函数；
+- 钩子执行完成后系统统一进入深度休眠（BLE 模式除外）。
 
 ---
 
@@ -357,29 +372,25 @@ print("耗时: " .. elapsed .. "ms")
 
 ### 2.5 sys - 系统信息
 
-#### sys.wake_source()
-
-获取本次启动的唤醒源（深度休眠唤醒原因）：
-
-```lua
-local source = sys.wake_source()  -- 0=上电/未知, 1=GPIO按键唤醒, 2=定时器唤醒
-
-if sys.wake_source() == 1 then
-    -- 按键唤醒：墨水屏保留上次画面，通常无需重绘
-end
-```
-
-典型用法：`setup()` 里判断如果是按键唤醒就跳过 `draw_screen()`，
-避免每次按键唤醒都触发一次墨水屏刷新（6色屏刷新约 30-40 秒）。
-
-**注意**：唤醒源只在**启动后的初始显示**期间有效——首个模块 `setup()`
-完成后设备端会消费该状态，之后 `sys.wake_source()` 恒返回 0。
-因此 BLE"刷新显示"、切换模块等显式重载触发的 `setup()` 会正常重绘，
-不会因为本次是按键唤醒而再次跳过。
+已移除 `sys.wake_source()`：统一休眠模型下按键唤醒由系统层处理，
+模块 `setup()` 一律绘制，无需判断唤醒源。
 
 #### sys.page_index()
 
 获取当前模块页索引（`subpage_index`）。
+
+#### sys.set_state(key, value) / sys.get_state(key)
+
+跨深度休眠的少量状态读写（RTC 内存，**掉电丢失**），按键切换等需要记住
+“当前显示位置”的场景使用：
+
+```lua
+sys.set_state("idx", 42)       -- 保存
+local idx = sys.get_state("idx")  -- 读取，未保存时返回 0
+```
+
+- 按“模块 id + 键名”哈希隔离，不同模块互不干扰（最多 8 个槽位）；
+- 深度休眠期间保持；完全掉电后清零（回退到默认/时间槽位逻辑即可）。
 
 ### 3. 标准 Lua 库
 
@@ -424,6 +435,11 @@ print("坐标:", x, y)
 ---
 
 ## 模块开发模式
+
+> ⚠️ **统一休眠模型**：当前固件**不再调用模块 `loop()`**。设备执行完逻辑立即
+> 深度休眠，周期刷新统一走"定时唤醒 → `setup()` 重绘"。下方旧示例中的
+> `loop()` 仅供理解常驻运行模式，实际开发请改为在 `.cfg` 声明 `interval`
+> 并用 `setup()` 绘制（见"深度休眠定时唤醒"）。
 
 ### 模式1: 静态显示
 适用于不需要频繁更新的内容。
@@ -644,11 +660,11 @@ text_centered(90, "Hello", 3)
 ### 5. 使用配置默认值
 ```lua
 -- ✅ 好：提供默认值
-local interval = CONFIG.refresh or 60
+local interval = CONFIG.interval or 60
 local format = CONFIG.time_format or "24h"
 
 -- ❌ 差：直接使用可能为nil
-local interval = CONFIG.refresh  -- 可能为nil
+local interval = CONFIG.interval  -- 可能为nil
 ```
 
 ### 6. 避免频繁创建表
@@ -667,6 +683,15 @@ function loop()
     local buffer = {}  -- 每次分配新内存
 end
 ```
+
+### 6.5 大数据表的内存优化
+
+ESP32-C3 的 Lua 堆有限（无自定义内存上限，堆耗尽会报 `not enough memory`）。
+内置大量静态数据时：
+
+- ✅ 用**扁平数组**：每条数据合并成单个字符串（如 `"名言\t作者"`），需要时再拆分；
+- ❌ 避免"每项一个小表 + 多个字符串对象"（对象数量 × 431 会显著放大内存占用）；
+- 脚本由设备端流式加载（`luaL_loadfile`），无需自行处理大文件。
 
 ### 7. 错误处理
 ```lua
@@ -1000,7 +1025,7 @@ end
 - [ ] `@description` 不超过 128 字节（约42个中文字符）
 
 ### 代码质量
-- [ ] 实现了 `loop()` 函数
+- [ ] 实现了 `setup()` 函数（统一模型下必需，`loop()` 不再被调用）
 - [ ] 合理使用 `time.delay()` 避免空转
 - [ ] 使用局部变量而非全局变量
 - [ ] 为配置项提供默认值

@@ -6,6 +6,7 @@
 #include "esp_sleep.h"
 #include "app_control.h"
 #include "common.h"
+#include "module_registry.h"
 #include "sleep_manager.h"
 #include "time_calibration.h"
 #include "GUI_Paint.h"
@@ -307,15 +308,8 @@ static int lua_display_fill_circle(lua_State* L) {
   return 0;
 }
 
-// display.text(x, y, str, size, color)
-// size: 1=Font8(5x8), 2=Font12(7x12), 3=Font16(11x16), 4=Font24(17x24)
-static int lua_display_text(lua_State* L) {
-  int x = (int)luaL_checknumber(L, 1);
-  int y = (int)luaL_checknumber(L, 2);
-  const char* str = luaL_checkstring(L, 3);
-  int size = (int)luaL_optnumber(L, 4, 2);
-  int c = (int)luaL_optnumber(L, 5, 0);
-
+// 在画布上绘制文本（ASCII + UTF-8 中文混排），准备画布并应用全局显示方向
+static void draw_text_canvas(int x, int y, const char* str, int size, int c) {
   display_prepare_canvas();
 
   sFONT* font = &Font12;
@@ -343,7 +337,30 @@ static int lua_display_text(lua_State* L) {
   } else {
     Paint_DrawString_EN(x, y, str, font, lua_color_to_paint(c), PAINT_BG_WHITE);
   }
+}
+
+// display.text(x, y, str, size, color)
+// size: 1=Font8(5x8), 2=Font12(7x12), 3=Font16(11x16), 4=Font24(17x24)
+static int lua_display_text(lua_State* L) {
+  int x = (int)luaL_checknumber(L, 1);
+  int y = (int)luaL_checknumber(L, 2);
+  const char* str = luaL_checkstring(L, 3);
+  int size = (int)luaL_optnumber(L, 4, 2);
+  int c = (int)luaL_optnumber(L, 5, 0);
+
+  draw_text_canvas(x, y, str, size, c);
   return 0;
+}
+
+// C++ 侧公共接口：清空画布为背景色（白色）
+void lua_hardware_clear_canvas(void) {
+  display_prepare_canvas();
+  Paint_Clear(PAINT_BG_WHITE);
+}
+
+// C++ 侧公共接口：在画布上绘制 UTF-8 文本（中文走 GB2312 字库）
+void lua_hardware_draw_utf8(int x, int y, const char* str, int size, int color) {
+  draw_text_canvas(x, y, str, size, color);
 }
 
 // display.show() -> 刷新到墨水屏（约12秒）
@@ -532,35 +549,79 @@ static int lua_sys_page_index(lua_State* L) {
   return 1;
 }
 
-// 本次启动的"唤醒意图"是否已被初始显示消费
-static bool s_boot_wake_consumed = false;
+// ============================================================================
+// RTC 持久化状态（深度休眠保持、掉电丢失）：
+// 供 Lua 模块跨深度休眠保存少量状态（如名言当前索引），
+// 按 "模块id + 键名" 哈希隔离，避免不同模块相互覆盖
+// ============================================================================
+#define LUA_STATE_SLOTS 8
+RTC_DATA_ATTR static int32_t s_lua_state_keys[LUA_STATE_SLOTS] = {0};
+RTC_DATA_ATTR static int32_t s_lua_state_vals[LUA_STATE_SLOTS] = {0};
 
-// 唤醒源：0=上电/未知, 1=GPIO按键唤醒, 2=定时器唤醒
-// 启动后首次调用返回真实唤醒源；被标记消费后（初始显示完成）返回 0，
-// 这样 BLE"刷新显示"等显式重载时 setup 会正常重绘
-static int lua_sys_wake_source(lua_State* L) {
-  int source = 0;
-  if (!s_boot_wake_consumed) {
-    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-    if (cause == ESP_SLEEP_WAKEUP_GPIO) {
-      source = 1;
-    } else if (cause == ESP_SLEEP_WAKEUP_TIMER) {
-      source = 2;
-    }
+static uint32_t lua_state_key(const char* module_id, const char* key) {
+  uint32_t h = 2166136261u;  // FNV-1a
+  const char* p = module_id ? module_id : "?";
+  while (*p) {
+    h ^= (uint8_t)*p++;
+    h *= 16777619u;
   }
-  lua_pushnumber(L, source);
-  return 1;
+  p = key ? key : "";
+  while (*p) {
+    h ^= (uint8_t)*p++;
+    h *= 16777619u;
+  }
+  return h ? h : 1;
 }
 
-// 标记本次启动的初始显示已完成（主程序在首个模块 setup 后调用），
-// 之后 sys.wake_source() 返回 0，显式刷新/切换模块会正常重绘
-void lua_hardware_mark_boot_wake_consumed() {
-  s_boot_wake_consumed = true;
+static int lua_sys_set_state(lua_State* L) {
+  const char* key = luaL_checkstring(L, 1);
+  int32_t value = (int32_t)luaL_checknumber(L, 2);
+  extern int32_t page_index;
+  const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
+  uint32_t k = lua_state_key(module && module->id ? module->id : "?", key);
+
+  int slot = -1;
+  int empty = -1;
+  for (int i = 0; i < LUA_STATE_SLOTS; i++) {
+    if (s_lua_state_keys[i] == (int32_t)k) {
+      slot = i;
+      break;
+    }
+    if (s_lua_state_keys[i] == 0 && empty < 0) {
+      empty = i;
+    }
+  }
+  if (slot < 0) {
+    slot = empty;
+  }
+  if (slot < 0) {
+    return 0;  // 槽位耗尽，忽略
+  }
+  s_lua_state_keys[slot] = (int32_t)k;
+  s_lua_state_vals[slot] = value;
+  return 0;
+}
+
+static int lua_sys_get_state(lua_State* L) {
+  const char* key = luaL_checkstring(L, 1);
+  extern int32_t page_index;
+  const module_descriptor_t* module = module_registry_get((uint8_t)page_index);
+  uint32_t k = lua_state_key(module && module->id ? module->id : "?", key);
+
+  for (int i = 0; i < LUA_STATE_SLOTS; i++) {
+    if (s_lua_state_keys[i] == (int32_t)k) {
+      lua_pushinteger(L, s_lua_state_vals[i]);
+      return 1;
+    }
+  }
+  lua_pushinteger(L, 0);
+  return 1;
 }
 
 static const luaL_Reg sys_lib[] = {
   {"page_index", lua_sys_page_index},
-  {"wake_source", lua_sys_wake_source},
+  {"set_state", lua_sys_set_state},
+  {"get_state", lua_sys_get_state},
   {NULL, NULL}
 };
 

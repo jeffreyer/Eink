@@ -11,9 +11,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <Preferences.h>
-#include "sleep_manager.h"
 #include "ble_config.h"
-#include "module_registry.h"
+#include "lua_hardware_api.h"
 
 // 墨水屏尺寸定义
 #ifdef INK6
@@ -43,6 +42,7 @@ static unsigned long s_last_display_time = 0;  // 上次显示时间
 
 // 前置声明
 static bool gallery_display_by_index(int index);
+static void gallery_ensure_initialized(void);
 static void rotate_image(uint8_t* image, int width, int height, int degrees);
 
 #ifdef INK6
@@ -174,25 +174,6 @@ static void rotate_image(uint8_t* image, int width, int height, int degrees) {
     Serial.printf("Gallery: Image rotated %d degrees (2-bit format)\n", degrees);
 }
 
-// 检查是否需要循环切换（由main.cpp的loop调用）
-bool gallery_should_cycle() {
-    if (!s_initialized || s_image_list.empty()) {
-        return false;
-    }
-
-    if (s_display_mode == 1) {
-        unsigned long current_time = millis();
-        unsigned long interval_ms = (unsigned long)s_cycle_interval * 60UL * 1000UL;
-
-        // 检查是否到了切换时间
-        if (current_time - s_last_display_time >= interval_ms) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 // 执行循环切换
 void gallery_do_cycle() {
     if (!s_initialized || s_image_list.empty()) {
@@ -212,12 +193,14 @@ void gallery_do_cycle() {
 
 // 模块按键钩子：KEY_DOWN 显示下一张（复用循环切换逻辑，避免重复代码）
 int gallery_next_image(void) {
+    gallery_ensure_initialized();
     gallery_do_cycle();
     return 0;
 }
 
 // 模块按键钩子：KEY_UP 显示上一张
 int gallery_prev_image(void) {
+    gallery_ensure_initialized();
     if (!s_initialized || s_image_list.empty()) {
         return 0;
     }
@@ -455,9 +438,12 @@ bool gallery_save_image(const char* filename, const uint8_t* data, size_t size) 
     return true;
 }
 
-// 模块初始化
-int gallery_setup(void) {
-    Serial.println("Gallery: Initializing...");
+// 初始化相册状态（配置 + 图片列表），可重复安全调用；
+// 按键唤醒跳过 setup 绘制后，上一张/下一张钩子内部懒初始化
+static void gallery_ensure_initialized(void) {
+    if (s_initialized) {
+        return;
+    }
 
     // 从common.cpp的配置系统加载配置
     s_display_mode = load_config_ns("gallery", "display_mode");
@@ -487,66 +473,109 @@ int gallery_setup(void) {
     // 确保SPIFFS已挂载
     if (!SPIFFS.begin(true)) {
         Serial.println("Gallery: SPIFFS mount failed");
-        return -1;
+        return;
     }
 
     // 扫描图片列表
     s_image_list = gallery_list_images();
     s_initialized = true;
     s_last_display_time = millis();  // 初始化时间
+}
 
-    // 按键唤醒（KEY_UP/KEY_DOWN）：不预显示任何图片。松手时由 check_btn 判定——
-    // 短按执行上一张/下一张，长按切换模块/开关 BLE，两种意图都只执行一次
-    bool wake_key_pending = (module_registry_peek_wake_key() != 0);
+// 模块初始化：统一语义——上电/定时唤醒/切换进入时绘制"当前应显示的内容"。
+// 循环模式每次绘制下一张（定时唤醒即切换），固定模式显示已保存的当前图片。
+// 按键唤醒不经过 setup（由系统层跳过，按键钩子直接处理）。
+// 无图片提示：UTF-8 安全按字符换行，size 4（24x24）逐行居中绘制
+static void gallery_draw_empty_prompt(void) {
+    lua_hardware_clear_canvas();
 
-    // 如果有图片，显示第一张
-    if (!s_image_list.empty()) {
-        esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
-        if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
-            
-            // 如果是循环模式，显示下一张；休眠由 main.cpp 定时唤醒检查统一处理
-            if (s_display_mode == 1) {
-                Serial.printf("Gallery: Cycle mode enabled, displaying next image\n");
-                s_current_image_index++;
-                if (s_current_image_index >= (int)s_image_list.size()) {
-                    s_current_image_index = 0;  // 循环到第一张
-                }
-                gallery_display_by_index(s_current_image_index);
-                save_config_ns("gallery", "img_index", s_current_image_index);
+    const char* prompt = "请上传图片：长按上键等待蓝色指示灯亮起，通过小程序“幻彩抽屉”连接上传图片。";
+    const int cell = 24;                       // size 4 中文 24x24
+    const int margin = 12;
+    const int max_chars = (EPD_WIDTH - margin * 2) / cell;  // 每行最多字符
+    const int line_h = cell + 6;               // 行距
+
+    // 统计总字符数（UTF-8 安全），用于垂直居中
+    int total_chars = 0;
+    for (const char* q = prompt; *q;) {
+        uint8_t b = (uint8_t)*q++;
+        if (b < 0x80) {
+            total_chars++;
+        } else if ((b & 0xE0) == 0xC0) {
+            q++;
+            total_chars++;
+        } else if ((b & 0xF0) == 0xE0) {
+            q += 2;
+            total_chars++;
+        } else if ((b & 0xF8) == 0xF0) {
+            q += 3;
+            total_chars++;
+        } else {
+            total_chars++;
+        }
+    }
+
+    int total_lines = (total_chars + max_chars - 1) / max_chars;
+    int y = (EPD_HEIGHT - total_lines * line_h) / 2 + 4;
+
+    const char* p = prompt;
+    while (*p) {
+        char line_buf[64];
+        int n = 0;
+        int chars_in_line = 0;
+        while (*p && chars_in_line < max_chars) {
+            uint8_t b = (uint8_t)*p;
+            int len = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0 ? 2 : ((b & 0xF0) == 0xE0 ? 3 : 4));
+            if (n + len >= (int)sizeof(line_buf)) {
+                break;
             }
-        } else if (!wake_key_pending) {
-            // 其他场景（上电 / 模块切换）：显示当前图片（基于已保存的 img_index）
+            memcpy(line_buf + n, p, len);
+            n += len;
+            p += len;
+            chars_in_line++;
+        }
+        line_buf[n] = '\0';
+        int line_w = chars_in_line * cell;
+        int x = (EPD_WIDTH - line_w) / 2;
+        lua_hardware_draw_utf8(x, y, line_buf, 4, 0);
+        y += line_h;
+    }
+}
+
+int gallery_setup(void) {
+    Serial.println("Gallery: Initializing...");
+    gallery_ensure_initialized();
+
+    if (!s_image_list.empty()) {
+        if (s_display_mode == 1) {
+            // 循环模式：每次进入/定时唤醒显示下一张
+            Serial.printf("Gallery: Cycle mode enabled, displaying next image\n");
+            s_current_image_index++;
+            if (s_current_image_index >= (int)s_image_list.size()) {
+                s_current_image_index = 0;  // 循环到第一张
+            }
+            gallery_display_by_index(s_current_image_index);
+            save_config_ns("gallery", "img_index", s_current_image_index);
+        } else {
+            // 固定模式：显示当前图片（基于已保存的 img_index）
             if (s_current_image_index < 0 || s_current_image_index >= (int)s_image_list.size()) {
                 s_current_image_index = 0;
             }
             gallery_display_by_index(s_current_image_index);
         }
     } else {
-        // 显示提示信息
-        // Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, WHITE0);
-        // Paint_SetScale(4);
-        // Paint_SelectImage(BlackImage);
-        // Paint_Clear(WHITE0);
-        // Paint_DrawString_EN(10, 80, "No Images", &Font24, BLACK0, WHITE0);
-        // Paint_DrawString_EN(10, 110, "Upload via App", &Font16, BLACK0, WHITE0);
-        // EPD_init_Fast2();
-        // PIC_display(BlackImage);
-        // EPD_sleep();
+        // 无图片：清空画布并居中显示提示（中文走 GB2312 字库，随全局显示方向旋转）
+        gallery_draw_empty_prompt();
+#ifdef INK6
+        epdDisplayImage(BlackImage, ALLSCREEN_BYTES);
+#else
+        EPD_init_Fast2();
+        PIC_display(BlackImage);
+        EPD_sleep();
+#endif
     }
 
     Serial.printf("Gallery: Initialized with %d images\n", s_image_list.size());
-    return 0;
-}
-
-// 模块循环（检查是否需要切换图片）
-int gallery_loop(void) {
-    // 检查是否需要循环切换
-    if (gallery_should_cycle()) {
-        gallery_do_cycle();
-
-        enter_deep_sleep();
-    }
-
     return 0;
 }
 

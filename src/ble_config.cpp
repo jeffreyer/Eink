@@ -60,9 +60,6 @@ void restore_timezone() {
 #include <base64.h>
 #include <sys/stat.h>
 
-// 外部变量声明
-extern uint32_t s_idle_timeout_ms;
-
 #define BLE_SERVICE_UUID "8c0b8a10-7e3d-4df7-9a2a-1d8d46f8b100"
 #define BLE_CONFIG_CHAR_UUID "8c0b8a11-7e3d-4df7-9a2a-1d8d46f8b100"
 #define BLE_STATUS_CHAR_UUID "8c0b8a12-7e3d-4df7-9a2a-1d8d46f8b100"
@@ -82,6 +79,10 @@ bool s_ble_enabled = false;
 static bool s_ble_had_connection = false;
 // 连接已结束且应休眠（重新连接时清除）
 static bool s_ble_sleep_after_disconnect = false;
+// BLE 开启时刻（无连接超时计时起点，毫秒）
+static uint32_t s_ble_start_ms = 0;
+// BLE 开启后无连接超时：写死 60 秒（统一休眠模型，不再依赖 sleep_sec 空闲超时）
+#define BLE_NO_CONNECT_TIMEOUT_MS (60UL * 1000UL)
 static bool s_ble_initialized = false;
 
 // 安全管理器
@@ -219,7 +220,15 @@ static bool extract_float(const String& json, const char* key, float* out) {
 }
 
 static String status_json(bool include_modules = false) {
-    uint32_t sleep_sec = s_idle_timeout_ms / 1000;
+    // 休眠时间已不再控制设备行为（统一为"执行完逻辑即休眠"），
+    // 仅保留存档值用于前端显示兼容
+    uint32_t sleep_sec;
+    {
+        Preferences prefs;
+        prefs.begin("bottle", true);
+        sleep_sec = prefs.getInt("sleep_sec", 60);
+        prefs.end();
+    }
     String mac = NimBLEDevice::getAddress().toString().c_str();
     String s = "{";
     s += "\"ok\":true";
@@ -919,7 +928,6 @@ static void apply_command(const String& cmd) {
 
     if (extract_int(cmd, "sleep_sec", &value)) {
         value = max(value, 0);
-        s_idle_timeout_ms = (uint32_t)value * 1000UL;
         save_config("sleep_sec", value);
     }
 
@@ -1213,6 +1221,7 @@ class ConfigServerCallbacks : public NimBLEServerCallbacks {
         s_client_connected = true;
         s_ble_had_connection = true;
         s_ble_sleep_after_disconnect = false;  // 重新连接，取消休眠标记
+        s_ble_start_ms = 0;                    // 已连接，停止无连接超时计时
         // 连接时立即发送状态
         String status = status_json();
         s_status_char->setValue(status.c_str());
@@ -1435,6 +1444,7 @@ void ble_config_init(void) {
     // 启动广播
     s_ble_advertising->start();
     s_ble_enabled = true;
+    s_ble_start_ms = millis();  // 无连接超时计时起点
     Serial.println("BLE: Advertising started successfully");
 }
 
@@ -1469,6 +1479,7 @@ void ble_config_stop(void) {
     s_has_pending_cmd = false;
     s_client_connected = false;
     s_ble_enabled = false;
+    s_ble_start_ms = 0;
     s_ble_initialized = false; // 标记为未初始化，下次需要重新初始化
     // 会话结束：若本次连接过，标记"断开后立即休眠"（由主循环执行）
     // if (s_ble_had_connection) {  //不判断有没有连接，直接标记断开后休眠
@@ -1481,8 +1492,15 @@ void ble_config_stop(void) {
 
 void ble_config_update(void) {
     if (!s_ble_enabled) return;
-    if (s_client_connected)
-        sleep_manager_reset_idle_timer(); // 重置空闲计时器，防止进入休眠
+
+    // BLE 开启后 60 秒无客户端连接：停止广播并休眠（复用"断开即休眠"标记）
+    if (!s_client_connected && s_ble_start_ms != 0 &&
+        (millis() - s_ble_start_ms >= BLE_NO_CONNECT_TIMEOUT_MS)) {
+        Serial.println("BLE: no client connected within 60s, stopping and sleeping");
+        ble_config_stop();  // 内部置位 s_ble_sleep_after_disconnect，主循环随后休眠
+        return;
+    }
+
     if (!s_has_pending_cmd) return;
 
     String cmd = s_pending_cmd;

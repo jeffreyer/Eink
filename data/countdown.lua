@@ -6,9 +6,6 @@
 
 -- 屏幕尺寸由设备端注册（4色屏 200x200，6色屏 240x240）
 
-local last_update = 0
-local update_interval = 3600000  -- 默认 1 小时刷新一次
-
 -- 公历日期转“自 1970-01-01 起的天数”（纯 Lua 实现，不依赖 os 库）
 local function days_from_civil(y, m, d)
     y = y - (m <= 2 and 1 or 0)
@@ -164,27 +161,11 @@ local function draw_screen()
 end
 
 function setup()
-    last_update = 0
-    -- 按键唤醒时墨水屏仍保留上次画面，跳过重绘避免无谓刷新
-    if sys.wake_source() ~= 1 then
-        draw_screen()
+    -- 统一模型：setup 一律绘制（定时唤醒刷新，按键唤醒由系统跳过 setup）
+    local ok, err = pcall(draw_screen)
+    if not ok then
+        print("Countdown error:", err)
     end
-end
-
-function loop()
-    local interval = (math.floor(tonumber(CONFIG.refresh) or 6)) * 1000 * 3600
-    if interval < 30000 then interval = 30000 end
-
-    local now_ms = time.millis()
-    if now_ms - last_update >= interval then
-        last_update = now_ms
-        local ok, err = pcall(draw_screen)
-        if not ok then
-            print("Countdown error:", err)
-        end
-    end
-
-    time.delay(10)
 end
 
 function unload()

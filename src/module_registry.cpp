@@ -29,7 +29,7 @@ static module_descriptor_t k_builtin_modules[] = {
         .script_path = nullptr,
         .setup = gallery_setup,
         .unload = gallery_unload,
-        .loop = gallery_loop,
+        .loop = nullptr,              // 统一模型：模块无常驻 loop，周期刷新由定时唤醒驱动
         .subpage_next = gallery_next_image,
         .subpage_prev = gallery_prev_image,
         .wake_interval = gallery_wake_interval,
@@ -59,9 +59,12 @@ static bool s_dynamic_lua_loaded[MAX_DYNAMIC_MODULES];
 
 // Forward declarations for dynamic Lua module functions
 static int dynamic_lua_setup(void);
+static int dynamic_lua_load_module(bool call_setup);
 static int dynamic_lua_loop(void);
 static int dynamic_lua_unload(void);
 static int dynamic_lua_wake_interval(void);
+static int dynamic_lua_subpage_next(void);
+static int dynamic_lua_subpage_prev(void);
 
 // Current dynamic module being executed
 static int s_current_dynamic_module = -1;
@@ -245,6 +248,9 @@ static bool load_dynamic_lua_module(const char* filename, const char* base_dir) 
   module->setup = dynamic_lua_setup;
   module->unload = dynamic_lua_unload;
   module->loop = dynamic_lua_loop;
+  // 仅当脚本定义了按键钩子函数时注册（避免无钩子模块在按键唤醒时被无谓加载）
+  module->subpage_next = (content.indexOf("function subpage_next") >= 0) ? dynamic_lua_subpage_next : nullptr;
+  module->subpage_prev = (content.indexOf("function subpage_prev") >= 0) ? dynamic_lua_subpage_prev : nullptr;
   module->wake_interval = dynamic_lua_wake_interval;
   module->config_count = 0;
   module->built_in = false;
@@ -731,7 +737,7 @@ String module_registry_manifest_json(int32_t index) {
 }
 
 // Dynamic Lua module execution functions
-static int dynamic_lua_setup(void) {
+static int dynamic_lua_load_module(bool call_setup) {
   // Find which dynamic module is being set up
   // We need to track this through the current page_index
   extern int32_t page_index;
@@ -781,46 +787,43 @@ static int dynamic_lua_setup(void) {
 
   String script_path = String(module->script_path);
 
-  // 使用 POSIX API 读取文件
-  FILE* fp = fopen(script_path.c_str(), "r");
-  if (!fp) {
-    Serial.print("Dynamic Lua setup: Failed to open ");
-    Serial.println(script_path);
+  // 流式加载 Lua 脚本（luaL_loadfile 内部按块读取并增量编译），
+  // 避免把整个脚本拼进 C++ String（容量按 2 的幂翻倍）再加载，
+  // 显著降低大脚本（如名言警句 36KB）的峰值内存
+  if (luaL_loadfile(L, script_path.c_str()) != LUA_OK) {
+    const char* error = lua_tostring(L, -1);
+    Serial.print("Dynamic Lua setup: Load error: ");
+    Serial.println(error ? error : "unknown");
+    lua_pop(L, 1);
     lua_close(L);
     return -1;
   }
 
-  // 读取文件内容
-  String script = "";
-  char buffer[256];
-  while (fgets(buffer, sizeof(buffer), fp) != nullptr) {
-    script += buffer;
-  }
-  fclose(fp);
-
-  // Execute script
-  if (luaL_dostring(L, script.c_str()) != LUA_OK) {
+  // Execute script（顶层函数：定义函数 + 构建数据表）
+  if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
     const char* error = lua_tostring(L, -1);
     Serial.print("Dynamic Lua setup: Script error: ");
-    Serial.println(error);
+    Serial.println(error ? error : "unknown");
     lua_pop(L, 1);
     lua_close(L);
     return -1;
   }
 
-  // Call setup function if it exists
-  lua_getglobal(L, "setup");
-  if (lua_isfunction(L, -1)) {
-    if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
-      const char* error = lua_tostring(L, -1);
-      Serial.print("Dynamic Lua setup: Error in setup(): ");
-      Serial.println(error);
+  // Call setup function if it exists（仅完整加载时执行，按键唤醒只加载不绘制）
+  if (call_setup) {
+    lua_getglobal(L, "setup");
+    if (lua_isfunction(L, -1)) {
+      if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+        const char* error = lua_tostring(L, -1);
+        Serial.print("Dynamic Lua setup: Error in setup(): ");
+        Serial.println(error);
+        lua_pop(L, 1);
+        lua_close(L);
+        return -1;
+      }
+    } else {
       lua_pop(L, 1);
-      lua_close(L);
-      return -1;
     }
-  } else {
-    lua_pop(L, 1);
   }
 
   // Start hardware resources declared by use()
@@ -829,8 +832,72 @@ static int dynamic_lua_setup(void) {
   s_dynamic_lua_states[dynamic_idx] = L;
   s_dynamic_lua_loaded[dynamic_idx] = true;
 
-  Serial.println("Dynamic Lua setup: Success");
+  Serial.printf("Dynamic Lua %s: Success (free heap %u B)\n",
+                call_setup ? "setup" : "load-only", (unsigned)ESP.getFreeHeap());
   return 0;
+}
+
+static int dynamic_lua_setup(void) {
+  return dynamic_lua_load_module(true);
+}
+
+// 按键钩子：调用 Lua 脚本中定义的 subpage_next/subpage_prev（KEY_DOWN/KEY_UP 短按）。
+// 按键唤醒时系统跳过了 setup（模块未加载）——这里先只加载脚本、不执行 setup 绘制，
+// 由 Lua 钩子函数自行绘制后，主流程统一进入深度休眠
+static int dynamic_lua_key_hook(const char* hook_name) {
+  extern int32_t page_index;
+  if (page_index < 0 || page_index >= s_total_module_count) {
+    return -1;
+  }
+  const module_descriptor_t* module = s_all_modules[page_index];
+  if (!module || module->built_in || !module->script_path) {
+    return -1;
+  }
+
+  int dynamic_idx = -1;
+  for (uint8_t i = 0; i < s_dynamic_module_count; i++) {
+    if (&s_dynamic_modules[i] == module) {
+      dynamic_idx = i;
+      break;
+    }
+  }
+  if (dynamic_idx < 0) {
+    return -1;
+  }
+
+  // 状态未加载（按键唤醒）：仅加载脚本，不执行 setup 绘制
+  if (!s_dynamic_lua_loaded[dynamic_idx]) {
+    if (dynamic_lua_load_module(false) != 0) {
+      return -1;
+    }
+  }
+
+  lua_State* L = s_dynamic_lua_states[dynamic_idx];
+  if (!L) {
+    return -1;
+  }
+
+  lua_getglobal(L, hook_name);
+  if (!lua_isfunction(L, -1)) {
+    lua_pop(L, 1);
+    return 0;  // 模块未定义按键钩子：无操作
+  }
+  if (lua_pcall(L, 0, 0, 0) != LUA_OK) {
+    const char* error = lua_tostring(L, -1);
+    Serial.print("Dynamic Lua hook error: ");
+    Serial.println(error ? error : "unknown");
+    lua_pop(L, 1);
+    return -1;
+  }
+  return 0;
+}
+
+static int dynamic_lua_subpage_next(void) {
+  return dynamic_lua_key_hook("subpage_next");
+}
+
+static int dynamic_lua_subpage_prev(void) {
+  return dynamic_lua_key_hook("subpage_prev");
 }
 
 static int dynamic_lua_loop(void) {
@@ -890,7 +957,9 @@ static int dynamic_lua_unload(void) {
   return 0;
 }
 
-// 动态 Lua 模块的定时唤醒间隔：读取模块配置 refresh（小时）→ 返回秒
+// 动态 Lua 模块的定时唤醒间隔：
+// 统一键 interval（分钟，1~1440，名言/倒计时通用）→ 返回秒；
+// refresh（小时）仅作旧版倒计时配置兼容（interval 未保存时回退）
 static int dynamic_lua_wake_interval(void) {
   extern int32_t page_index;
   if (page_index < 0 || page_index >= s_total_module_count) {
@@ -899,6 +968,12 @@ static int dynamic_lua_wake_interval(void) {
   const module_descriptor_t* module = s_all_modules[page_index];
   if (!module || module->built_in || !module->id) {
     return 0;
+  }
+
+  int minutes = load_config_ns(String(module->id), "interval");
+  if (minutes > 0) {
+    if (minutes > 1440) minutes = 1440;
+    return minutes * 60;
   }
 
   int hours = load_config_ns(String(module->id), "refresh");
