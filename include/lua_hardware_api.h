@@ -33,5 +33,8 @@ void lua_hardware_clear_canvas(void);
 // C++ 侧画布工具：绘制 UTF-8 文本（中文走 GB2312 字库，size/color 同 display.text）
 void lua_hardware_draw_utf8(int x, int y, const char* str, int size, int color);
 
+// 预加载 GB2312 字库映射表（开机内存充足时调用，避免 BLE 中首次绘制失败）
+bool lua_hardware_preload_gb2312(void);
+
 int draw_led_text(const char* text,int x,int y,int r,int g,int b);
 int draw_led_text_rotated(const char* text, int x, int y, int r, int g, int b);

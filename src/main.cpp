@@ -301,6 +301,10 @@ void setup() {
 
   SPIFFS.begin(true);
 
+  // 预加载 GB2312 字库映射表：开机内存最充足时加载，
+  // 避免 BLE 会话中首次绘制中文时堆不足导致全部显示为 '?'
+  lua_hardware_preload_gb2312();
+
   #ifdef INK6
   init_eink6();
   #else

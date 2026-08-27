@@ -393,7 +393,6 @@ static bool gb_map_load() {
   if (s_gb_map_loaded) {
     return s_gb_map != nullptr;
   }
-  s_gb_map_loaded = true;
 
   FILE* fp = fopen(GB_MAP_PATH, "rb");
   if (!fp) {
@@ -409,8 +408,9 @@ static bool gb_map_load() {
 
   uint16_t* buf = (uint16_t*)malloc((size_t)count * 4);
   if (!buf) {
+    Serial.println("Lua: GB2312 map malloc failed");
     fclose(fp);
-    return false;
+    return false;  // s_gb_map_loaded 保持 false，下次绘制自动重试
   }
   if (fread(buf, 4, count, fp) != count) {
     free(buf);
@@ -421,8 +421,15 @@ static bool gb_map_load() {
 
   s_gb_map = buf;
   s_gb_map_count = count;
+  s_gb_map_loaded = true;
   Serial.printf("Lua: GB2312 map loaded (%u entries)\n", count);
   return true;
+}
+
+// 开机时预加载 GB2312 映射表：此时内存最充足，
+// 避免 BLE 会话中首次绘制中文时因堆不足/碎片化加载失败而显示为 '?'
+bool lua_hardware_preload_gb2312(void) {
+  return gb_map_load();
 }
 
 // 二分查找 unicode -> gbcode（0 表示未收录）
