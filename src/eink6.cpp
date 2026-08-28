@@ -328,6 +328,9 @@ void epdEnterDeepSleep() {
 
 
 void epdDisplaySolid(EpdColorByte color) {
+    epdReset();
+    epdInitJD7601();
+    
     Serial.println("[EPD] stage: write frame");
     epdWriteCommand(0x10);  // DTM1 Write
     epdWaitBusyStage("DTM1", BUSY_TIMEOUT_INIT_MS);
