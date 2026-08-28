@@ -8,6 +8,10 @@
 **显示屏**: 两个版本
 - 4色屏（默认）：200x200（黑、白、黄、红）
 - 6色屏（`INK6` 宏）：240x240 JD7601（黑、白、黄、红、蓝、绿），1.54寸
+  - `INK6` 在 `include/common.h` 中定义/注释切换；**当前为 4 色屏模式（已注释）**
+  - `eink6.cpp` 整体由 `#ifdef INK6` 保护（文件顶部先 `#include "common.h"`
+    才能看到该宏），4 色构建时不参与编译（避免与 `eink.cpp` 重复定义
+    `BlackImage`/`gui_drawtext`）
 **刷新时间**: 4色约12秒；6色约30-40秒（驱动内 BUSY 超时上限 40 秒）  
 **通信方式**: BLE (NimBLE)  
 **开发环境**: PlatformIO + Arduino Framework  

@@ -5,11 +5,11 @@
 #include <Preferences.h>
 #include "esp_sleep.h"
 #include "app_control.h"
-#include "common.h"
 #include "module_registry.h"
 #include "sleep_manager.h"
 #include "time_calibration.h"
 #include "GUI_Paint.h"
+#include "common.h"
 #ifdef INK6
 #include "eink6.h"
 #else

@@ -1,3 +1,7 @@
+#include "common.h"   // INK6 宏在此定义，eink6.cpp 需先包含才能正确条件编译
+
+#ifdef INK6
+
 #include <Arduino.h>
 #include <SPI.h>
 #include "eink6.h"
@@ -542,3 +546,5 @@ int init_eink6(){
 // void loop() {
 //     delay(1000);
 // }
+
+#endif // INK6
