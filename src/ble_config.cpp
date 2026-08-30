@@ -1350,6 +1350,9 @@ void ble_config_init(void) {
         return;
     }
 
+    // 省电：BLE 配置模式 CPU 降到 80MHz（ESP32-C3 在 80MHz 下 BLE 正常工作）
+    // setCpuFrequencyMhz(80);
+
     // 新会话：重置连接状态跟踪
     s_ble_had_connection = false;
     s_ble_sleep_after_disconnect = false;
@@ -1371,6 +1374,9 @@ void ble_config_init(void) {
 
         Serial.println("BLE: Initializing NimBLE stack...");
         NimBLEDevice::init(BLE_DEVICE_NAME);
+
+        // 省电：发射功率降到 0dBm（近距离连接足够，降低 TX 峰值电流）
+        NimBLEDevice::setPower(0);
 
         // 清除所有绑定设备（解决部分设备无法广播的问题）
         int bondCount = NimBLEDevice::getNumBonds();
@@ -1422,6 +1428,11 @@ void ble_config_init(void) {
         Serial.println("BLE: Configuring advertising...");
         s_ble_advertising = NimBLEDevice::getAdvertising();
         s_ble_advertising->addServiceUUID(BLE_SERVICE_UUID);
+
+        // 省电：广播间隔 100~200ms（默认约 40ms，间隔越长越省电；
+        // 单位 0.625ms：160=100ms，320=200ms）
+        s_ble_advertising->setMinInterval(160);
+        s_ble_advertising->setMaxInterval(320);
 
         // 在广播数据中包含设备名称（手机扫描需要）
         NimBLEAdvertisementData advertisementData;
@@ -1486,6 +1497,9 @@ void ble_config_stop(void) {
         s_ble_sleep_after_disconnect = true;
     // }
     s_ble_had_connection = false;
+
+    // 恢复 CPU 频率（BLE 停止后系统随即进入深度休眠，恢复仅为状态一致性）
+    // setCpuFrequencyMhz(160);
 
     Serial.println("BLE: BLE stopped and deinitialized");
 }

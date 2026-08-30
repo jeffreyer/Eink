@@ -525,6 +525,24 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
     写死，不依赖配置；连接后取消计时，断开后仍走"会话结束立即休眠"）
   - BLE 会话结束（长按 KEY_UP 退出 / 小程序断开）：立即休眠，不重绘屏幕，
     新配置在下次唤醒的 `setup()` 中生效
+- **BLE 省电优化**（A+B+D+E）：
+  - **A. light sleep**：`platformio.ini` 的 `custom_sdkconfig` 开启
+    `CONFIG_PM_ENABLE=y` + `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y`，BLE 广播/空闲时
+    系统自动进入 light sleep（C3 支持 BT 唤醒 + BT 断电），广播平均电流从十几~二十几
+    mA 降至 ~1-3mA。⚠️ 自定义 sdkconfig 会触发一次 Arduino IDF 库全量重编（约 10-30
+    分钟，含组件下载），成功后缓存（`sdkconfig.defaults` 写入哈希），之后为增量构建
+  - **B. 广播间隔 100~200ms**：`NimBLEAdvertising::setMinInterval(160)/setMaxInterval(320)`
+    （单位 0.625ms），替代默认约 40ms 快速广播
+  - **D. TX 功率 0dBm**：`NimBLEDevice::setPower(0)`（近距离连接足够）
+  - **E. CPU 80MHz**：进入 BLE 时 `setCpuFrequencyMhz(80)`，`ble_config_stop()` 恢复 160
+  - 依赖的平台补丁（pioarduino，机器级）：
+    - `component_manager.py`：lib_ignore 剪组件时应用 BT/BLE 保护
+    - `espidf.py`：`get_lib_ignore_components` 从 `platformio.ini`（UTF-8）读取
+      `lib_deps` 判断 NimBLE 依赖，避免自定义 sdkconfig 重建库时剪掉 bt 组件
+    - `src/log_printf_wrap.cpp`：补 `__wrap_log_printf`（core 3.3.8 移除该符号，
+      pioarduino 链接脚本仍保留 `-Wl,--wrap=log_printf`）
+  - 原 `-DCONFIG_BT_ENABLED=0 -DCONFIG_BLUEDROID_ENABLED=0` 已移除（与 sdkconfig
+    冲突，且会导致库构建时自带 BLE 库误判走 Bluedroid 分支）
 - 已移除：空闲超时（`sleep_sec` 仅存档，不再控制休眠）、模块常驻 `loop`、
   Lua `sys.wake_source()`（模块 setup 一律绘制，按键唤醒由系统层跳过）
 - **模块定时唤醒**：`module_descriptor_t` 的 `wake_interval` 钩子返回秒（0=不启用），

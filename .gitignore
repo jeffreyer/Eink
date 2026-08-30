@@ -1,4 +1,8 @@
 /.pio/
+/.dummy/
+/managed_components/
+/sdkconfig.defaults
+/sdkconfig.pico32
 /.vscode/
 /.claude/
 /misc/
