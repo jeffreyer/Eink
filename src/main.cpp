@@ -293,6 +293,7 @@ void check_btn(){
 }
 
 void setup() {
+  setCpuFrequencyMhz(80);
   Serial.begin(115200);
   pinMode(KEY_UP, INPUT);
   pinMode(KEY_DOWN, INPUT);

@@ -527,10 +527,19 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
     新配置在下次唤醒的 `setup()` 中生效
 - **BLE 省电优化**（A+B+D+E）：
   - **A. light sleep**：`platformio.ini` 的 `custom_sdkconfig` 开启
-    `CONFIG_PM_ENABLE=y` + `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y`，BLE 广播/空闲时
-    系统自动进入 light sleep（C3 支持 BT 唤醒 + BT 断电），广播平均电流从十几~二十几
-    mA 降至 ~1-3mA。⚠️ 自定义 sdkconfig 会触发一次 Arduino IDF 库全量重编（约 10-30
-    分钟，含组件下载），成功后缓存（`sdkconfig.defaults` 写入哈希），之后为增量构建
+    `CONFIG_PM_ENABLE=y` + `CONFIG_FREERTOS_USE_TICKLESS_IDLE=y`，且必须同时开启
+    **蓝牙控制器低功耗**：
+    - `CONFIG_BT_CTRL_MODEM_SLEEP=y`（蓝牙 modem sleep，否则控制器以
+      `ESP_BT_SLEEP_MODE_NONE` 初始化，使能时持有 `ESP_PM_NO_LIGHT_SLEEP` 锁，
+      **直接禁止系统 light sleep**，实测仍 41mA 即此原因）
+    - `CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y`（主晶振做低功耗时钟，C3 无外部 32k）
+    - `CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y`（light sleep 期间主晶振
+      保持上电，否则 `lpclk_sel==MAIN_XTAL` 时 `no_light_sleep` 仍为 1）
+    BLE 广播/空闲时系统可进入 light sleep（C3 支持 BT 唤醒 + BT 断电），广播平均
+    电流从 ~41mA 降至数 mA 量级（主晶振保持上电有几百 µA 代价）。⚠️ 自定义 sdkconfig
+    会触发一次 Arduino IDF 库全量重编（约 10-30 分钟，含组件下载，Windows 偶发组件
+    目录被占用报 WinError 32/145，清理对应 managed_components 子目录重试即可），
+    成功后缓存（`sdkconfig.defaults` 写入哈希），之后为增量构建
   - **B. 广播间隔 100~200ms**：`NimBLEAdvertising::setMinInterval(160)/setMaxInterval(320)`
     （单位 0.625ms），替代默认约 40ms 快速广播
   - **D. TX 功率 0dBm**：`NimBLEDevice::setPower(0)`（近距离连接足够）

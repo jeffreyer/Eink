@@ -1350,9 +1350,6 @@ void ble_config_init(void) {
         return;
     }
 
-    // 省电：BLE 配置模式 CPU 降到 80MHz（ESP32-C3 在 80MHz 下 BLE 正常工作）
-    // setCpuFrequencyMhz(80);
-
     // 新会话：重置连接状态跟踪
     s_ble_had_connection = false;
     s_ble_sleep_after_disconnect = false;
@@ -1497,9 +1494,6 @@ void ble_config_stop(void) {
         s_ble_sleep_after_disconnect = true;
     // }
     s_ble_had_connection = false;
-
-    // 恢复 CPU 频率（BLE 停止后系统随即进入深度休眠，恢复仅为状态一致性）
-    // setCpuFrequencyMhz(160);
 
     Serial.println("BLE: BLE stopped and deinitialized");
 }
