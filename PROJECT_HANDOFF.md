@@ -8,7 +8,7 @@
 **显示屏**: 两个版本
 - 4色屏（默认）：200x200（黑、白、黄、红）
 - 6色屏（`INK6` 宏）：240x240 JD7601（黑、白、黄、红、蓝、绿），1.54寸
-  - `INK6` 在 `include/common.h` 中定义/注释切换；**当前为 4 色屏模式（已注释）**
+  - `INK6` 在 `include/common.h` 中定义/注释切换；**当前为 6 色屏模式（已开启）**
   - `eink6.cpp` 整体由 `#ifdef INK6` 保护（文件顶部先 `#include "common.h"`
     才能看到该宏），4 色构建时不参与编译（避免与 `eink.cpp` 重复定义
     `BlackImage`/`gui_drawtext`）
@@ -513,6 +513,11 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
 
 #### 休眠管理 (sleep_manager.cpp)
 - **统一休眠模型**：任何逻辑执行完立即进入深度休眠，只有 BLE 配置模式保持唤醒。
+  - **电池保护**：每次开机（上电 / 按键 / 定时唤醒）`setup()` 先测电压
+    （`battery.h` 的 `BATTERY_LOW_MV = 3100` mV）；低于阈值时不执行任何模块逻辑
+    （不绘制、不进 BLE），直接 `enter_deep_sleep()`；保留按键 + 模块定时唤醒，
+    电压恢复后再次开机自动继续正常运行。若由按键唤醒且按键仍按住，
+    等释放后再休眠，避免 GPIO 低电平立即再次唤醒形成开机循环
   - 上电 / 定时唤醒：模块 `setup()` 绘制 → 立即 `enter_deep_sleep()`
   - 按键唤醒：跳过 setup，由 `check_btn` 判定 → 短按动作/切模块后休眠，
     长按 KEY_UP 进入 BLE 保持唤醒

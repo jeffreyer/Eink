@@ -328,8 +328,6 @@ void setup() {
 
   main_load_config();
 
-  check_battery_init();
-
   module_registry_init();
 
   page_index = module_registry_normalize_index(page_index);
@@ -344,6 +342,22 @@ void setup() {
     enter_deep_sleep();
   }
   #endif
+
+  // 电池保护：每次开机（上电 / 按键 / 定时唤醒）都先检测电压。
+  // 低于 3.1V 时不执行任何模块逻辑（不绘制、不进 BLE 配置），直接深度休眠；
+  // 保留按键与定时唤醒，电压恢复后再次开机即可自动继续正常运行。
+  check_battery_init();
+  int battery_mv = battery_get_mv();
+  if (battery_mv < BATTERY_LOW_MV) {
+    Serial.printf("Battery too low: %d mV (< %d), skip all actions, enter deep sleep\n",
+                  battery_mv, BATTERY_LOW_MV);
+    // 若由按键唤醒且按键仍按住，等释放后再休眠，
+    // 避免 GPIO 低电平唤醒源立即再次触发形成开机循环
+    while (digitalRead(KEY_UP) == LOW || digitalRead(KEY_DOWN) == LOW) {
+      delay(50);
+    }
+    enter_deep_sleep();
+  }
 
   // 统一休眠策略：
   // - 按键唤醒：记录唤醒按键，跳过模块 setup 绘制，由 check_btn 判定短按/长按
