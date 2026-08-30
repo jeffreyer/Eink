@@ -150,7 +150,9 @@ bool epdWaitBusy(uint32_t timeoutMs = 15000) {
     uint32_t start = millis();
     const int busyLevel = gBusyActiveLevelLow ? LOW : HIGH;
     while (digitalRead(PIN_EPD_BUSY) == busyLevel) {
-        delay(1);
+        // 省电：轮询间隔须 ≥ tickless idle 入睡阈值（8ms @ 1000Hz），
+        // 否则等待 BUSY 期间 CPU 一直活跃（约 15mA），无法进入 light sleep
+        delay(20);
         if (millis() - start > timeoutMs) {
             Serial.printf("[EPD] wait busy timeout, pin=%d, activeLow=%d\n",
                           digitalRead(PIN_EPD_BUSY), gBusyActiveLevelLow ? 1 : 0);

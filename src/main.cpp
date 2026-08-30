@@ -423,5 +423,5 @@ void loop() {
 
   // 非 BLE 模式仅存在于按键唤醒判定期间（随后必然休眠）。
   // 模块不再有常驻 loop：周期刷新统一由深度休眠定时唤醒 → setup 驱动
-  delay(10);
+  delay(20);  // ≥ tickless idle 入睡阈值（8ms @ 1000Hz），等待期间可 light sleep
 }

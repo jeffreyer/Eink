@@ -577,6 +577,11 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
     模块周期重新进入深度休眠。
   - 若未休眠（实时交互 / BLE / 上电后待机）：主循环 `epdPanelPowerMaintain()` 在
     `EPD_PANEL_POWEROFF_DELAY_MS`（3秒）后延迟断电面板。
+  - **BUSY 等待省电**：`epdWaitBusy` 轮询间隔从 `delay(1)` 改为 `delay(20)`——
+    tickless idle 入睡阈值为 8ms（`FREERTOS_IDLE_TIME_BEFORE_SLEEP=8` @ 1000Hz），
+    1ms 轮询让 CPU 永远睡不进 light sleep，等待面板 BUSY（如 30 秒断电快路径最多
+    等 40 秒）时 CPU 全程活跃约 15mA；20ms 轮询可进入 light sleep，
+    该阶段电流从 ~18mA 降至面板自身的 3~5mA。主循环 `delay(10)` 同步改为 `delay(20)`
   - 连续绘制保护：新绘制开始时若上一帧刷新仍在进行，`epdDisplayImage` 先等待
     BUSY 完成再重置面板，避免打断刷新。
   4色屏保持同步刷屏（沿用旧驱动）。
