@@ -1350,6 +1350,17 @@ void ble_config_init(void) {
         return;
     }
 
+    #ifdef INK6
+    // 省电：BLE 配置模式不绘制屏幕，按键唤醒进入 BLE 前确保 6 色面板已断电
+    // 并进入深度休眠，避免面板驱动 IC 在 BLE 会话期间持续耗电
+    epdFinishPowerOff();
+    epdClearRefreshPending();
+    #endif
+
+    // 省电：蓝色指示灯改低占空比 PWM（1kHz、5%），替代常亮（常亮约 2~8mA）
+    ledcAttach(BLE_LIGHT, 1000, 8);
+    ledcWrite(BLE_LIGHT, 13);  // 8bit 分辨率，13/255 ≈ 5%
+
     // 新会话：重置连接状态跟踪
     s_ble_had_connection = false;
     s_ble_sleep_after_disconnect = false;
@@ -1495,6 +1506,9 @@ void ble_config_stop(void) {
     // }
     s_ble_had_connection = false;
 
+    // 关闭指示灯 PWM，恢复高电平（灭灯）
+    ledcDetach(BLE_LIGHT);
+
     Serial.println("BLE: BLE stopped and deinitialized");
 }
 
@@ -1542,7 +1556,6 @@ void ble_config_toggle(void) {
     } else {
         Serial.println("BLE: Starting BLE...");
         ble_config_init();
-        digitalWrite(BLE_LIGHT,LOW);
         Serial.println("BLE: BLE started");
     }
 }

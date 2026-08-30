@@ -540,6 +540,10 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
     会触发一次 Arduino IDF 库全量重编（约 10-30 分钟，含组件下载，Windows 偶发组件
     目录被占用报 WinError 32/145，清理对应 managed_components 子目录重试即可），
     成功后缓存（`sdkconfig.defaults` 写入哈希），之后为增量构建
+  - **BLE 模式附加省电**（实测 41→20mA 后再压）：
+    - 进入 BLE 前 `epdFinishPowerOff()` + `epdClearRefreshPending()`（仅 INK6）：
+      按键唤醒进 BLE 时 6 色面板仍处于 init 后未断电状态，驱动 IC 持续耗电
+    - 蓝色指示灯改 LEDC 低占空比 PWM（1kHz、8bit、5%），常亮约 2~8mA → ~0.2mA
   - **B. 广播间隔 100~200ms**：`NimBLEAdvertising::setMinInterval(160)/setMaxInterval(320)`
     （单位 0.625ms），替代默认约 40ms 快速广播
   - **D. TX 功率 0dBm**：`NimBLEDevice::setPower(0)`（近距离连接足够）
