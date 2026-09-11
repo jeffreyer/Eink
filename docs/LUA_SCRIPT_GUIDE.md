@@ -278,7 +278,7 @@ display.circle(100, 100, 50, 1)  -- 绘制空心圆
 display.fill_circle(100, 100, 30, 1)  -- 绘制实心圆
 ```
 
-#### display.text(x, y, text, size, color)
+#### display.text(x, y, text, size, color[, background])
 显示文本（ASCII + UTF-8 中文）。
 
 ```lua
@@ -287,6 +287,7 @@ display.text(10, 100, "World", 3)    -- 中字
 display.text(10, 150, "!", 4)        -- 大字
 display.text(10, 30, "Red", 3, 3)    -- 红色文字（color: 0=黑,1=白,2=黄,3=红,4=蓝,5=绿）
 display.text(10, 80, "纪念日", 3)    -- 中文（UTF-8）
+display.text(10, 120, "今日", 3, 0, 2) -- 黑字 + 黄色字格背景（用于压在色块上）
 ```
 
 **参数**:
@@ -298,6 +299,9 @@ display.text(10, 80, "纪念日", 3)    -- 中文（UTF-8）
   - 3: 18×24 像素
   - 4: 24×32 像素
 - `color`: 文字颜色（可选，默认黑色 0）
+- `background`: 可选。省略时保持旧行为（ASCII 字格白底、中文只画前景）；
+  指定 `0-5` 时字格用该颜色填满，适合在色块上显示文字；指定 `-1` 时透明，
+  只画文字前景点。
 
 **中文字体说明**:
 - 中文使用内置 GB2312 点阵：`size 3` 对应 16x16，`size 4` 对应 24x24，与同尺寸
@@ -986,7 +990,7 @@ end
 | `display.fill_rect(x, y, w, h, c)` | 位置, 尺寸, color | 填充矩形 |
 | `display.circle(x, y, r, c)` | 圆心, 半径, color | 绘制圆形框 |
 | `display.fill_circle(x, y, r, c)` | 圆心, 半径, color | 填充圆形 |
-| `display.text(x, y, str, size, c)` | 位置, 文本, 大小, 颜色 | 显示文本(ASCII) |
+| `display.text(x, y, str, size, c[, bg])` | 位置, 文本, 大小, 颜色, 背景色 | 显示文本(ASCII/中文)；背景色可选，-1=透明 |
 | `display.show()` | - | 刷新显示(约12秒) |
 
 ### 时间 API

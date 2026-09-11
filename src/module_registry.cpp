@@ -982,3 +982,132 @@ static int dynamic_lua_wake_interval(void) {
   }
   return hours * 3600;
 }
+
+// 从配置定义 JSON 中提取指定 key 的 int 默认值。
+// 配置数组元素是对象，字段顺序不固定（云端可能按 default/desc/key/label/options/type 排序）。
+// 这里按 “{...}” 对象边界逐个解析，在对象内部寻找 "key" 和 "default"，不假设先后顺序。
+static bool extract_config_default_int(const String& config_json, const char* target_key, int* out_value) {
+  if (!target_key || !out_value) {
+    return false;
+  }
+
+  int object_start = 0;
+  while (true) {
+    int obj_begin = config_json.indexOf('{', object_start);
+    if (obj_begin < 0) {
+      return false;
+    }
+
+    // 找到该对象的结束位置（跳过 options 里的嵌套对象）
+    int depth = 0;
+    int obj_end = -1;
+    for (int i = obj_begin; i < (int)config_json.length(); i++) {
+      char c = config_json[i];
+      if (c == '{') {
+        depth++;
+      } else if (c == '}') {
+        depth--;
+        if (depth == 0) {
+          obj_end = i;
+          break;
+        }
+      }
+    }
+    if (obj_end < 0) {
+      return false;
+    }
+
+    String obj = config_json.substring(obj_begin + 1, obj_end);
+
+    int key_pos = obj.indexOf("\"key\"");
+    if (key_pos >= 0) {
+      int key_colon = obj.indexOf(':', key_pos);
+      int quote1 = (key_colon >= 0) ? obj.indexOf('"', key_colon + 1) : -1;
+      int quote2 = (quote1 >= 0) ? obj.indexOf('"', quote1 + 1) : -1;
+      if (quote1 >= 0 && quote2 > quote1) {
+        String key = obj.substring(quote1 + 1, quote2);
+        if (key == target_key) {
+          int default_pos = obj.indexOf("\"default\"");
+          if (default_pos < 0) {
+            return false;
+          }
+          int default_colon = obj.indexOf(':', default_pos);
+          if (default_colon < 0) {
+            return false;
+          }
+
+          int i = default_colon + 1;
+          while (i < (int)obj.length()) {
+            char c = obj[i];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '"') {
+              i++;
+            } else {
+              break;
+            }
+          }
+
+          bool negative = false;
+          if (i < (int)obj.length() && obj[i] == '-') {
+            negative = true;
+            i++;
+          }
+
+          long value = 0;
+          bool has_digit = false;
+          while (i < (int)obj.length()) {
+            char c = obj[i];
+            if (c < '0' || c > '9') {
+              break;
+            }
+            value = value * 10 + (c - '0');
+            has_digit = true;
+            i++;
+          }
+          if (!has_digit) {
+            return false;
+          }
+          *out_value = (int)(negative ? -value : value);
+          return true;
+        }
+      }
+    }
+
+    object_start = obj_end + 1;
+  }
+}
+
+// 模块安装/更新并写入 cfg 后，把指定 int 配置的默认值补写进 NVS。
+// 仅当 NVS 中还没有该键时写入，避免覆盖用户已保存的配置。
+void module_registry_apply_config_default_int(const char* module_id, const char* key) {
+  if (!module_id || !key || strlen(module_id) == 0 || strlen(key) == 0) {
+    return;
+  }
+
+  // 动态模块安装到 SPIFFS；用脚本路径让 load_config_definition 找到 <id>.cfg
+  String script_path = String("/spiffs/") + module_id + ".lua";
+  String config_json = load_config_definition(module_id, script_path.c_str());
+  if (config_json.length() == 0) {
+    return;
+  }
+
+  int default_value = 0;
+  if (!extract_config_default_int(config_json, key, &default_value)) {
+    Serial.printf("Module config default: %s.%s 未在 cfg 中找到默认值\n", module_id, key);
+    return;
+  }
+
+  Preferences prefs;
+  if (!prefs.begin(module_id, true)) {
+    return;
+  }
+  bool exists = prefs.isKey(key);
+  prefs.end();
+  if (exists) {
+    Serial.printf("Module config default: %s.%s 已存在，保留用户值\n", module_id, key);
+    return;
+  }
+
+  save_config_ns(String(module_id), String(key), default_value);
+  Serial.printf("Module config default: %s.%s = %d (来自 cfg 默认值)\n",
+                module_id, key, default_value);
+}

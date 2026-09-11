@@ -184,7 +184,10 @@ static const luaL_Reg time_lib[] = {
 
 // 前向声明（GB2312 中文字库渲染，定义于本文件后方）
 static bool gb_map_load();
-static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* ascii_font, UWORD color);
+static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* ascii_font,
+                           UWORD color, bool fill_bg, UWORD bg_color);
+static void draw_ascii_text_ex(int x, int y, const char* str, sFONT* font,
+                               UWORD color, UWORD bg_color, bool fill_bg);
 
 // 画布缓冲（4色屏定义于 eink.cpp，6色屏定义于 eink6.cpp）
 extern unsigned char BlackImage[ALLSCREEN_BYTES];
@@ -308,8 +311,11 @@ static int lua_display_fill_circle(lua_State* L) {
   return 0;
 }
 
+// 文本背景参数：调用方未传 background 时保持旧行为（ASCII 字格白底，中文只画前景）
+#define LUA_TEXT_BG_DEFAULT (-1000)
+
 // 在画布上绘制文本（ASCII + UTF-8 中文混排），准备画布并应用全局显示方向
-static void draw_text_canvas(int x, int y, const char* str, int size, int c) {
+static void draw_text_canvas(int x, int y, const char* str, int size, int c, int bg) {
   display_prepare_canvas();
 
   sFONT* font = &Font12;
@@ -331,24 +337,46 @@ static void draw_text_canvas(int x, int y, const char* str, int size, int c) {
     }
   }
 
+  UWORD fg = lua_color_to_paint(c);
+
+  if (bg == LUA_TEXT_BG_DEFAULT) {
+    // 旧行为：ASCII 用白底清空字格；中文只画前景点，不覆盖背景
+    if (has_utf8) {
+      gb_map_load();
+      draw_utf8_text(x, y, str, cn_cell, font, fg, false, 0);
+    } else {
+      Paint_DrawString_EN(x, y, str, font, fg, PAINT_BG_WHITE);
+    }
+    return;
+  }
+
+  // 新行为：background 明确给定时，ASCII 和中文都按同色填满字格；
+  // background = -1 时表示透明，只画前景点。
+  bool fill_bg = (bg >= 0);
+  UWORD bg_color = fill_bg ? lua_color_to_paint(bg) : 0;
   if (has_utf8) {
     gb_map_load();
-    draw_utf8_text(x, y, str, cn_cell, font, lua_color_to_paint(c));
+    draw_utf8_text(x, y, str, cn_cell, font, fg, fill_bg, bg_color);
   } else {
-    Paint_DrawString_EN(x, y, str, font, lua_color_to_paint(c), PAINT_BG_WHITE);
+    draw_ascii_text_ex(x, y, str, font, fg, bg_color, fill_bg);
   }
 }
 
-// display.text(x, y, str, size, color)
+// display.text(x, y, str, size, color[, background])
 // size: 1=Font8(5x8), 2=Font12(7x12), 3=Font16(11x16), 4=Font24(17x24)
+// background: 省略时保持旧行为；-1=透明；0-5=用对应颜色填满字格
 static int lua_display_text(lua_State* L) {
   int x = (int)luaL_checknumber(L, 1);
   int y = (int)luaL_checknumber(L, 2);
   const char* str = luaL_checkstring(L, 3);
   int size = (int)luaL_optnumber(L, 4, 2);
   int c = (int)luaL_optnumber(L, 5, 0);
+  int bg = LUA_TEXT_BG_DEFAULT;
+  if (!lua_isnoneornil(L, 6)) {
+    bg = (int)luaL_checknumber(L, 6);
+  }
 
-  draw_text_canvas(x, y, str, size, c);
+  draw_text_canvas(x, y, str, size, c, bg);
   return 0;
 }
 
@@ -360,7 +388,7 @@ void lua_hardware_clear_canvas(void) {
 
 // C++ 侧公共接口：在画布上绘制 UTF-8 文本（中文走 GB2312 字库）
 void lua_hardware_draw_utf8(int x, int y, const char* str, int size, int color) {
-  draw_text_canvas(x, y, str, size, color);
+  draw_text_canvas(x, y, str, size, color, LUA_TEXT_BG_DEFAULT);
 }
 
 // display.show() -> 刷新到墨水屏（约12秒）
@@ -473,7 +501,9 @@ static uint32_t utf8_decode(const char* s, int* len) {
 }
 
 // 从字库文件读取并绘制一个 GB2312 字形到 (x, y)
-static void gb_glyph_draw(FILE* fp, uint16_t gbcode, int x, int y, int cell, UWORD color) {
+// fill_bg=true 时，字形之外的点也涂成 bg_color（用于文字压在色块上）
+static void gb_glyph_draw(FILE* fp, uint16_t gbcode, int x, int y, int cell,
+                          UWORD color, bool fill_bg, UWORD bg_color) {
   int hi = gbcode >> 8;
   int lo = gbcode & 0xFF;
   int bytes_per_row = cell / 8;
@@ -491,13 +521,69 @@ static void gb_glyph_draw(FILE* fp, uint16_t gbcode, int x, int y, int cell, UWO
     for (int c = 0; c < cell; c++) {
       if (row[c / 8] & (0x80 >> (c % 8))) {
         Paint_SetPixel(x + c, y + r, color);
+      } else if (fill_bg) {
+        Paint_SetPixel(x + c, y + r, bg_color);
       }
     }
   }
 }
 
+// 绘制一个 ASCII 字符，可控制字格背景是否填充。
+// 与 GUI_Paint 的 Paint_DrawChar 逻辑一致，但不依赖全局 FONT_BACKGROUND 哨兵值，
+// 因此可以安全地在色块上画“同色底 + 前景字”。
+static void draw_ascii_char_ex(int x, int y, char ch, sFONT* font,
+                               UWORD color, UWORD bg_color, bool fill_bg) {
+  if (x > Paint.Width || y > Paint.Height) {
+    return;
+  }
+
+  uint32_t char_offset = (uint32_t)((unsigned char)ch - ' ') *
+                         font->Height * (font->Width / 8 + (font->Width % 8 ? 1 : 0));
+  const unsigned char* ptr = &font->table[char_offset];
+
+  for (UWORD page = 0; page < font->Height; page++) {
+    for (UWORD column = 0; column < font->Width; column++) {
+      if (*ptr & (0x80 >> (column % 8))) {
+        Paint_SetPixel(x + column, y + page, color);
+      } else if (fill_bg) {
+        Paint_SetPixel(x + column, y + page, bg_color);
+      }
+      if (column % 8 == 7) {
+        ptr++;
+      }
+    }
+    if (font->Width % 8 != 0) {
+      ptr++;
+    }
+  }
+}
+
+// 绘制纯 ASCII 字符串（保留 Paint_DrawString_EN 的换行行为）
+static void draw_ascii_text_ex(int x, int y, const char* str, sFONT* font,
+                               UWORD color, UWORD bg_color, bool fill_bg) {
+  int start_x = x;
+  int start_y = y;
+  int cx = x;
+  int cy = y;
+
+  while (*str != '\0') {
+    if ((cx + font->Width) > Paint.Width) {
+      cx = start_x;
+      cy += font->Height;
+    }
+    if ((cy + font->Height) > Paint.Height) {
+      cx = start_x;
+      cy = start_y;
+    }
+    draw_ascii_char_ex(cx, cy, *str, font, color, bg_color, fill_bg);
+    cx += font->Width;
+    str++;
+  }
+}
+
 // 绘制 UTF-8 文本（ASCII + 中文混排）
-static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* ascii_font, UWORD color) {
+static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* ascii_font,
+                           UWORD color, bool fill_bg, UWORD bg_color) {
   FILE* fp = nullptr;
   const char* p = str;
   int cx = x;
@@ -507,13 +593,13 @@ static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* as
     uint32_t uni = utf8_decode(p, &len);
 
     if (uni < 0x80) {
-      Paint_DrawChar(cx, y, (char)uni, ascii_font, color, PAINT_BG_WHITE);
+      draw_ascii_char_ex(cx, y, (char)uni, ascii_font, color, bg_color, fill_bg);
       cx += ascii_font->Width;
     } else {
       if (!fp) {
         fp = fopen(cn_cell == 24 ? GB_FONT_24_PATH : GB_FONT_16_PATH, "rb");
         if (!fp) {
-          Paint_DrawChar(cx, y, '?', ascii_font, color, PAINT_BG_WHITE);
+          draw_ascii_char_ex(cx, y, '?', ascii_font, color, bg_color, fill_bg);
           cx += ascii_font->Width;
           p += len;
           continue;
@@ -523,9 +609,9 @@ static void draw_utf8_text(int x, int y, const char* str, int cn_cell, sFONT* as
       uint16_t gb = gb_map_lookup(uni);
       if (gb == 0) {
         // 字库未收录，回退画 '?'
-        Paint_DrawChar(cx, y, '?', ascii_font, color, PAINT_BG_WHITE);
+        draw_ascii_char_ex(cx, y, '?', ascii_font, color, bg_color, fill_bg);
       } else {
-        gb_glyph_draw(fp, gb, cx, y, cn_cell, color);
+        gb_glyph_draw(fp, gb, cx, y, cn_cell, color, fill_bg, bg_color);
       }
       cx += cn_cell;
     }

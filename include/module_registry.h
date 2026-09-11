@@ -39,6 +39,9 @@ String module_registry_manifest_json(int32_t index);
 
 // 标记指定模块的配置已变更（NVS 已保存，由 BLE 配置写入时调用）
 void module_registry_mark_config_changed(const char* module_id);
+// 模块安装/更新并写入 cfg 后，把指定 int 配置的默认值补写进 NVS。
+// 仅当 NVS 中还没有该键时写入，避免覆盖用户已保存的配置。
+void module_registry_apply_config_default_int(const char* module_id, const char* key);
 // 主循环中调用：若当前模块配置被修改，重新加载该模块（unload + setup）
 void module_registry_update(void);
 // 强制重新加载当前模块（unload + setup），用于手动刷新显示

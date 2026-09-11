@@ -548,6 +548,8 @@ static void apply_command(const String& cmd) {
 
         // 查找并启用新上传的模块
         if (uploaded_module_id.length() > 0) {
+            // 若是覆盖安装且 cfg 已存在，补齐 interval 默认值；首次安装时 cfg 还没上传，会在配置定义落盘后再补
+            module_registry_apply_config_default_int(uploaded_module_id.c_str(), "interval");
 
             for (int i = 0; i < module_registry_count(); i++) {
                 const module_descriptor_t* module = module_registry_get(i);
@@ -590,6 +592,8 @@ static void apply_command(const String& cmd) {
                         fwrite(config_json.c_str(), 1, config_json.length(), cfg_file);
                         fclose(cfg_file);
                         Serial.printf("BLE: 配置定义已保存到 %s\n", cfg_filename.c_str());
+                        // 安装/更新后，把 interval 的 cfg 默认值补写进 NVS（不覆盖用户已保存的值）
+                        module_registry_apply_config_default_int(module_id.c_str(), "interval");
                     } else {
                         Serial.printf("BLE: 无法保存配置文件 %s\n", cfg_filename.c_str());
                     }
@@ -674,11 +678,14 @@ static void apply_command(const String& cmd) {
 
         // 保存配置定义到文件（而不是 NVS）
         String cfg_filename = "/spiffs/" + s_config_def_module_id + ".cfg";
+        String config_json = s_config_def_buffer;
         FILE* cfg_file = fopen(cfg_filename.c_str(), "w");
         if (cfg_file) {
-            fwrite(s_config_def_buffer.c_str(), 1, s_config_def_buffer.length(), cfg_file);
+            fwrite(config_json.c_str(), 1, config_json.length(), cfg_file);
             fclose(cfg_file);
             Serial.printf("BLE: 配置定义已保存到 %s\n", cfg_filename.c_str());
+            // 安装/更新后，把 interval 的 cfg 默认值补写进 NVS（不覆盖用户已保存的值）
+            module_registry_apply_config_default_int(s_config_def_module_id.c_str(), "interval");
         } else {
             Serial.printf("BLE: 无法保存配置文件 %s\n", cfg_filename.c_str());
         }
