@@ -55,6 +55,13 @@ void epdAsyncHoldPinsImpl(const int* pins, int count, bool hold);
 // 驱动发出刷新命令后调用：进入“刷新中”状态（RTC 标记，跨深度休眠保持）
 void epdAsyncMarkStarted(void);
 
+// 同上，但显式给出本次刷新预计耗时（毫秒，含余量）：
+// 局部刷新比全刷快得多，按实际类型决定补断电唤醒时刻，能少让面板通电
+void epdAsyncMarkStartedMs(uint32_t expected_ms);
+
+// 本次异步刷新预计需要等待多少毫秒才唤醒补断电（至少 1 秒）
+uint32_t epdAsyncWakeMs(void);
+
 // 新一帧开始前调用：上一帧仍在刷新则先等它结束（避免 reset 打断刷新），
 // 并清除“刷新中”标记
 void epdAsyncWaitPrevious(void);

@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <SPI.h>
 #include <string.h>
+#include "esp_rom_crc.h"
 #include "eink_bw.h"
 #include "GUI_Paint.h"
 #include "epd_async.h"
@@ -32,6 +33,48 @@ static const uint8_t WF_Full_1IN54[159] = {
   0x0, 0x0, 0x0, 0x0, 0x0, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x0,
   0x0, 0x0, 0x22, 0x17, 0x41, 0x0, 0x32, 0x20
 };
+
+// 局部刷波形表（原厂 WF_PARTIAL_1IN54，同样 159 字节）
+static const uint8_t WF_Partial_1IN54[159] = {
+  0x0, 0x40, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x80, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x40, 0x40, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x0, 0x80, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0xF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x1, 0x1, 0x0, 0x0, 0x0,
+  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0,
+  0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x0, 0x0, 0x0, 0x02, 0x17, 0x41, 0xB0, 0x32, 0x28,
+};
+
+// 上一帧缓存：放在 RTC 内存（深度休眠后仍保留、掉电丢失）。
+// 局部刷需要"上一帧"作为面板 0x26 的基准图；本项目每次刷完都深度休眠，
+// 普通 RAM 会丢，所以放这里（ESP32-C3 RTC 数据区约 8KB，本工程其余只用了几十字节）。
+// 用标记 + CRC 校验：掉电/异常复位后 RTC 内存可能丢失或残缺，校验不过就全刷
+#define EPD_BW_PREV_MARKER 0xE10D5A17u
+RTC_DATA_ATTR static uint8_t s_prev_frame[EPD_FRAME_BYTES];
+RTC_DATA_ATTR static uint32_t s_prev_crc = 0;
+RTC_DATA_ATTR static uint32_t s_prev_marker = 0;  // 掉电后为 0 → 首帧自动全刷
+RTC_DATA_ATTR static uint8_t s_partial_run = 0;   // 连续局部刷次数（到上限强制全刷）
+
+static uint32_t epdBWFrameCrc(const uint8_t* frame) {
+  return esp_rom_crc32_le(0, frame, EPD_FRAME_BYTES);
+}
+
+// 上一帧基准是否可信（RTC 内存跨深度休眠保留，掉电或残缺时校验不过）
+static bool epdBWPrevFrameUsable() {
+  return s_prev_marker == EPD_BW_PREV_MARKER && s_prev_crc == epdBWFrameCrc(s_prev_frame);
+}
+
+static void epdBWStorePrevFrame(const uint8_t* frame) {
+  memcpy(s_prev_frame, frame, EPD_FRAME_BYTES);
+  s_prev_crc = epdBWFrameCrc(s_prev_frame);
+  s_prev_marker = EPD_BW_PREV_MARKER;
+}
 
 // ====================== 底层收发 ======================
 
@@ -82,6 +125,17 @@ void epdBWReset() {
   digitalWrite(EPD_BW_RST_PIN, HIGH);
   delay(50);
   epdBWWaitBusy();
+}
+
+// 只做硬件复位（不等待 BUSY）：补断电前把控制 IC 拉回已知状态用。
+// 面板处于睡眠/非初始化态时 BUSY 不可靠，等它就会白等
+static void epdBWResetOnly() {
+  digitalWrite(EPD_BW_RST_PIN, HIGH);
+  delay(20);
+  digitalWrite(EPD_BW_RST_PIN, LOW);
+  delay(20);
+  digitalWrite(EPD_BW_RST_PIN, HIGH);
+  delay(50);
 }
 
 // ====================== 面板初始化 ======================
@@ -166,6 +220,60 @@ static void epdBWTurnOnDisplay() {
   epdBWWriteCommand(0x20);
 }
 
+// 触发一次局部刷新（0xCF：只驱动与 0x26 基准图有差异的像素）
+static void epdBWTurnOnDisplayPart() {
+  epdBWWriteCommand(0x22);
+  epdBWWriteData(0xCF);
+  epdBWWriteCommand(0x20);
+}
+
+// 切到局部刷新模式：局部波形表 + 显示选项(0x37) + BorderWaveform(0x3C)
+// 照搬原厂 EPD_Init_Partial()，只是省掉它前面的复位——本驱动每帧都会整屏初始化
+static void epdBWEnterPartialMode() {
+  epdBWSetLut(WF_Partial_1IN54);
+
+  epdBWWriteCommand(0x37);  // Display option
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x40);
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x00);
+  epdBWWriteData(0x00);
+
+  epdBWWriteCommand(0x3C);  // BorderWaveform（局部模式）
+  epdBWWriteData(0x80);
+
+  epdBWWriteCommand(0x22);
+  epdBWWriteData(0xC0);
+  epdBWWriteCommand(0x20);
+  epdBWWaitBusy();
+}
+
+// 写一帧到指定 RAM 命令（0x24 = 新图 / 0x26 = 基准旧图）；frame 为空时补白
+static void epdBWWriteFrameTo(uint8_t cmd, const uint8_t* frame) {
+  epdBWWriteCommand(cmd);
+  if (frame != nullptr) {
+    epdBWWriteBytes(frame, EPD_FRAME_BYTES);
+    return;
+  }
+  for (uint32_t i = 0; i < EPD_FRAME_BYTES; i++) {
+    epdBWWriteData(0xFF);
+  }
+}
+
+// 统计两帧之间变化的像素数（bit 级差异）
+static uint32_t epdBWCountChangedPixels(const uint8_t* a, const uint8_t* b) {
+  uint32_t changed = 0;
+  for (uint32_t i = 0; i < EPD_FRAME_BYTES; i++) {
+    changed += (uint32_t)__builtin_popcount((unsigned)(a[i] ^ b[i]));
+  }
+  return changed;
+}
+
 // ====================== 对外接口 ======================
 
 void epdBWEnterDeepSleep() {
@@ -177,26 +285,60 @@ void epdBWDisplayImage(const unsigned char* imgData, uint32_t dataLen) {
   // 上一帧刷新若仍在进行，先等它结束，避免 reset 打断刷新
   epdAsyncWaitPrevious();
 
-  epdBWInitPanel();
-
-  epdBWWriteCommand(0x24);  // Write RAM（B/W）
-
-  if (imgData != nullptr && dataLen == EPD_FRAME_BYTES) {
-    epdBWWriteBytes(imgData, EPD_FRAME_BYTES);
-  } else {
-    if (imgData != nullptr) {
-      Serial.printf("[EPD-BW] warning: frame size mismatch: %u (expected %u)\n",
-                    (unsigned)dataLen, (unsigned)EPD_FRAME_BYTES);
-    }
-    for (uint32_t i = 0; i < EPD_FRAME_BYTES; i++) {
-      epdBWWriteData(0xFF);  // 缺数据时补白，避免花瓶
-    }
+  // 取帧：尺寸不符时按“全部变化”处理（走全刷 + 补白）
+  const bool frame_ok = (imgData != nullptr && dataLen == EPD_FRAME_BYTES);
+  const uint8_t* frame = frame_ok ? imgData : nullptr;
+  if (imgData != nullptr && dataLen != EPD_FRAME_BYTES) {
+    Serial.printf("[EPD-BW] warning: frame size mismatch: %u (expected %u)\n",
+                  (unsigned)dataLen, (unsigned)EPD_FRAME_BYTES);
   }
 
-  epdBWTurnOnDisplay();
-  // 异步刷屏：刷新命令已发出，立即返回让 MCU 进入深度休眠；
-  // 刷新结束后的断电 + 面板深度休眠由 epd_async 调度完成
-  epdAsyncMarkStarted();
+  // 能不能局部刷：上一帧可用 + 变化像素不多 + 未到连续局部刷上限
+  const uint32_t total_pixels = (uint32_t)EPD_WIDTH * EPD_HEIGHT;
+  uint32_t changed_px = total_pixels;
+  bool use_partial = false;
+  if (frame_ok && epdBWPrevFrameUsable()) {
+    changed_px = epdBWCountChangedPixels(frame, s_prev_frame);
+    use_partial = (changed_px * 100u <= (uint32_t)EPD_BW_PARTIAL_MAX_DIRTY_PCT * total_pixels) &&
+                  (s_partial_run < EPD_BW_PARTIAL_MAX_RUN);
+  }
+
+  epdBWInitPanel();
+
+  if (use_partial) {
+    // 局部刷：0x24 = 新帧、0x26 = 上一帧（基准），面板只驱动两者不同的像素
+    epdBWEnterPartialMode();
+    epdBWWriteFrameTo(0x24, frame);
+    epdBWWriteFrameTo(0x26, s_prev_frame);
+    epdBWTurnOnDisplayPart();
+    s_partial_run++;
+    Serial.printf("[EPD-BW] partial refresh: %u px changed (%u.%02u%%), run %u/%u\n",
+                  (unsigned)changed_px,
+                  (unsigned)(changed_px * 100u / total_pixels),
+                  (unsigned)((changed_px * 10000u / total_pixels) % 100u),
+                  (unsigned)s_partial_run, (unsigned)EPD_BW_PARTIAL_MAX_RUN);
+    epdAsyncMarkStartedMs(EPD_BW_PARTIAL_REFRESH_MS);
+  } else {
+    // 全刷：0x24 与 0x26 都写新帧（把基准图更新为当前画面）
+    epdBWWriteFrameTo(0x24, frame);
+    epdBWWriteFrameTo(0x26, frame);
+    epdBWTurnOnDisplay();
+    Serial.printf("[EPD-BW] full refresh: %u px changed (%u.%02u%%), partial_run was %u%s\n",
+                  (unsigned)changed_px,
+                  (unsigned)(changed_px * 100u / total_pixels),
+                  (unsigned)((changed_px * 10000u / total_pixels) % 100u),
+                  (unsigned)s_partial_run,
+                  frame_ok ? "" : " [bad frame]");
+    s_partial_run = 0;
+    epdAsyncMarkStartedMs(EPD_BW_FULL_REFRESH_MS);
+  }
+
+  // 记录本帧，作为下一轮的局部刷基准（RTC 内存，跨深度休眠保留）
+  if (frame_ok) {
+    epdBWStorePrevFrame(frame);
+  } else {
+    s_prev_marker = 0;  // 数据不可信，下一轮强制全刷
+  }
 }
 
 void epdBWDisplaySolid(uint8_t color) {
@@ -281,8 +423,13 @@ void epdPanelHoldPins(bool hold) {
 }
 
 void epdPanelPowerOff(void) {
-  // 刷新结束的等待已由 epdAsyncPowerOffNow()/epdAsyncMaintain() 处理，这里只断电
+  // MCU 休眠期间控制 IC 可能停在非初始化态、或刷新还没走完，此时直接发深睡命令
+  // (0x10 0x01) 会被忽略，面板模拟电路一直通电（表现为刷完电流偏大）。
+  // 先复位把它拉回已知状态（只复位、不等 BUSY），再发深睡命令。
+  // 墨水屏双稳态，复位不会影响已显示画面。
+  epdBWResetOnly();
   epdBWEnterDeepSleep();
+  Serial.println("[EPD-BW] panel reset + deep sleep");
 }
 
 #endif  // INK_BW

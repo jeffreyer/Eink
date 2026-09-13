@@ -8,11 +8,25 @@
 // （“30 秒后唤醒补断电”这一路径依赖该标记判断本次唤醒的来意）
 RTC_DATA_ATTR static bool s_refresh_pending = false;
 static uint32_t s_refresh_start_ms = 0;
+static uint32_t s_refresh_expected_ms = EPD_ASYNC_REFRESH_SLEEP_S * 1000;
 
 void epdAsyncMarkStarted(void) {
+  epdAsyncMarkStartedMs(EPD_ASYNC_REFRESH_SLEEP_S * 1000);
+}
+
+void epdAsyncMarkStartedMs(uint32_t expected_ms) {
   s_refresh_pending = true;
   s_refresh_start_ms = millis();
-  Serial.println("[EPD] async refresh started");
+  s_refresh_expected_ms = expected_ms ? expected_ms : (EPD_ASYNC_REFRESH_SLEEP_S * 1000);
+  Serial.printf("[EPD] async refresh started (window %u ms)\n", (unsigned)s_refresh_expected_ms);
+}
+
+uint32_t epdAsyncWakeMs(void) {
+  uint32_t ms = s_refresh_expected_ms;
+  if (ms == 0) {
+    ms = EPD_ASYNC_REFRESH_SLEEP_S * 1000;
+  }
+  return ms < 1000 ? 1000 : ms;   // 定时唤醒至少 1 秒
 }
 
 // 等待面板刷新结束（带超时保险 + 诊断日志）

@@ -26,10 +26,19 @@
 #define BW_BLACK 0
 #define BW_WHITE 1
 
-// 异步刷屏参数（见 include/epd_async.h）：黑白屏全刷约 2 秒，留足余量
-#define EPD_ASYNC_REFRESH_SLEEP_S 3
+// 异步刷屏参数（见 include/epd_async.h）
+// 局部刷的窗口在下面单独定义；这里是未指定时的兜底窗口
+#define EPD_ASYNC_REFRESH_SLEEP_S 4
 #define EPD_PANEL_POWEROFF_DELAY_MS 3000
 #define EPD_ASYNC_WAIT_TIMEOUT_MS 3000
+
+// 局部刷新策略：SSD1681 支持局部刷（面板比对 0x26 基准图与 0x24 新图，只驱动有差异的
+// 像素），波形短、速度快（约 0.3~0.5s，全刷约 2~2.6s），且不会整屏闪黑。
+// 代价是局部波形驱动不充分、会积累残影，所以变化太大或连续局部刷太多次时改走全刷。
+#define EPD_BW_PARTIAL_MAX_DIRTY_PCT 25   // 变化像素超过 25% 就全刷
+#define EPD_BW_PARTIAL_MAX_RUN       10   // 连续局部刷 10 次后强制全刷一次
+#define EPD_BW_FULL_REFRESH_MS       4000 // 全刷的补断电唤醒窗口（毫秒，含余量）
+#define EPD_BW_PARTIAL_REFRESH_MS    1500 // 局部刷的补断电唤醒窗口（毫秒，含余量）
 
 bool epdPanelIsIdle(void);
 void epdPanelPowerOff(void);
