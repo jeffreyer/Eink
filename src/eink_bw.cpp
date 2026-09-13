@@ -11,6 +11,7 @@
 #include <string.h>
 #include "eink_bw.h"
 #include "GUI_Paint.h"
+#include "epd_async.h"
 
 // 1bpp 画布：1 字节 8 像素，bit=1 为白，与面板 0x24 RAM 的位定义一致
 unsigned char BlackImage[ALLSCREEN_BYTES];
@@ -55,17 +56,22 @@ static void epdBWWriteBytes(const uint8_t* data, size_t len) {
   digitalWrite(EPD_BW_CS_PIN, HIGH);
 }
 
-// 屏忙检测：BUSY 高电平表示忙，低电平表示空闲
-void epdBWWaitBusy() {
+// 屏忙检测：BUSY 高电平表示忙，低电平表示空闲。返回是否在超时前空闲
+static bool epdBWWaitBusyTimeout(uint32_t timeout_ms) {
   uint32_t start = millis();
   while (digitalRead(EPD_BW_BUSY_PIN) == HIGH) {
     // 轮询间隔 ≥ tickless idle 入睡阈值，等待期间允许 CPU 进入 light sleep
     delay(10);
-    if (millis() - start > EPD_BW_BUSY_TIMEOUT_MS) {
+    if (millis() - start > timeout_ms) {
       Serial.println("[EPD-BW] wait busy timeout");
-      return;
+      return false;
     }
   }
+  return true;
+}
+
+void epdBWWaitBusy() {
+  epdBWWaitBusyTimeout(EPD_BW_BUSY_TIMEOUT_MS);
 }
 
 void epdBWReset() {
@@ -153,12 +159,11 @@ static void epdBWInitPanel() {
   epdBWSetLut(WF_Full_1IN54);
 }
 
-// 触发一次全屏刷新并等待完成
+// 触发一次全屏刷新（发完即返回，不等待 BUSY）
 static void epdBWTurnOnDisplay() {
   epdBWWriteCommand(0x22);
   epdBWWriteData(0xC7);
   epdBWWriteCommand(0x20);
-  epdBWWaitBusy();
 }
 
 // ====================== 对外接口 ======================
@@ -169,6 +174,9 @@ void epdBWEnterDeepSleep() {
 }
 
 void epdBWDisplayImage(const unsigned char* imgData, uint32_t dataLen) {
+  // 上一帧刷新若仍在进行，先等它结束，避免 reset 打断刷新
+  epdAsyncWaitPrevious();
+
   epdBWInitPanel();
 
   epdBWWriteCommand(0x24);  // Write RAM（B/W）
@@ -186,7 +194,9 @@ void epdBWDisplayImage(const unsigned char* imgData, uint32_t dataLen) {
   }
 
   epdBWTurnOnDisplay();
-  epdBWEnterDeepSleep();  // 刷新完成立即让面板休眠，降低静态功耗
+  // 异步刷屏：刷新命令已发出，立即返回让 MCU 进入深度休眠；
+  // 刷新结束后的断电 + 面板深度休眠由 epd_async 调度完成
+  epdAsyncMarkStarted();
 }
 
 void epdBWDisplaySolid(uint8_t color) {
@@ -211,8 +221,6 @@ int init_eink_bw() {
   Serial.printf("[EPD-BW] init pins: MOSI=%d CLK=%d BUSY=%d DC=%d CS=%d RST=%d\n",
                 EPD_BW_MOSI_PIN, EPD_BW_CLK_PIN, EPD_BW_BUSY_PIN,
                 EPD_BW_DC_PIN, EPD_BW_CS_PIN, EPD_BW_RST_PIN);
-
-  epdBWInitPanel();
   return 0;
 }
 
@@ -230,7 +238,13 @@ int gui_drawtext(const char* str) {
 // ====================== 统一显示接口（见 eink_display.h）======================
 
 int eink_display_init(void) {
-  return init_eink_bw();
+  init_eink_bw();
+  // 异步刷屏补断电唤醒：面板正在刷新，不能 reset（会打断刷新），
+  // 本次唤醒只做总线初始化，随后由 epdAsyncPowerOffNow() 断电
+  if (!epdAsyncIsPending()) {
+    epdBWInitPanel();
+  }
+  return 0;
 }
 
 void eink_display_frame(void) {
@@ -239,6 +253,36 @@ void eink_display_frame(void) {
 
 void eink_display_white(void) {
   epdBWDisplaySolid(BW_WHITE);
+}
+
+// ====================== 异步刷屏钩子（见 epd_async.h）======================
+
+bool epdPanelIsIdle(void) {
+  // BUSY 低 = 空闲，刷新已结束
+  return digitalRead(EPD_BW_BUSY_PIN) == LOW;
+}
+
+int epdPanelBusyRaw(void) {
+  return digitalRead(EPD_BW_BUSY_PIN);
+}
+
+void epdPanelHoldPins(bool hold) {
+  if (hold) {
+    // 休眠前把控制脚拉到空闲电平再保持
+    digitalWrite(EPD_BW_CS_PIN, HIGH);
+    digitalWrite(EPD_BW_DC_PIN, HIGH);
+    digitalWrite(EPD_BW_RST_PIN, HIGH);
+  }
+  static const int pins[] = {
+    EPD_BW_RST_PIN, EPD_BW_DC_PIN, EPD_BW_CS_PIN,
+    EPD_BW_CLK_PIN, EPD_BW_MOSI_PIN
+  };
+  epdAsyncHoldPinsImpl(pins, sizeof(pins) / sizeof(pins[0]), hold);
+}
+
+void epdPanelPowerOff(void) {
+  // 刷新结束的等待已由 epdAsyncPowerOffNow()/epdAsyncMaintain() 处理，这里只断电
+  epdBWEnterDeepSleep();
 }
 
 #endif  // INK_BW

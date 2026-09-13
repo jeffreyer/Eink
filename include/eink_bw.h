@@ -19,17 +19,28 @@
 #define EPD_BW_CS_PIN   5
 #define EPD_BW_RST_PIN  3
 
-// 面板全刷后进入深度休眠的等待上限
+// 面板 BUSY 等待上限（初始化/补断电保险用）
 #define EPD_BW_BUSY_TIMEOUT_MS 15000
 
 // 纯色刷屏参数（与 Lua 颜色值 0=黑 / 1=白 对齐）
 #define BW_BLACK 0
 #define BW_WHITE 1
 
+// 异步刷屏参数（见 include/epd_async.h）：黑白屏全刷约 2 秒，留足余量
+#define EPD_ASYNC_REFRESH_SLEEP_S 3
+#define EPD_PANEL_POWEROFF_DELAY_MS 3000
+#define EPD_ASYNC_WAIT_TIMEOUT_MS 3000
+
+bool epdPanelIsIdle(void);
+void epdPanelPowerOff(void);
+int epdPanelBusyRaw(void);
+void epdPanelHoldPins(bool hold);
+
 int init_eink_bw();
 int gui_drawtext(const char* str);
 
-// 整帧刷新（内部完成上电 → 刷屏 → 等待 BUSY → 断电 → 面板深度休眠）
+// 整帧刷新（发完刷新命令立即返回，刷新期间由系统深度休眠，
+// 刷新结束后由 epd_async 调度断电 + 面板深度休眠）
 void epdBWDisplayImage(const unsigned char* imgData, uint32_t dataLen);
 
 // 纯色刷屏：BW_BLACK / BW_WHITE

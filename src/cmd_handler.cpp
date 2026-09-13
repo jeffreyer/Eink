@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 #include "eink_display.h"
+#include "epd_async.h"
 
 void check_cmd(){
   if (Serial.available() > 0) {
@@ -191,6 +192,14 @@ void check_cmd(){
     }
     else if (command.startsWith("white")) {
       eink_display_white();
+    }
+    else if (command.startsWith("probe")) {
+      // 诊断：触发一次全白刷新并打印 BUSY 电平时间线（确认空闲极性/刷新时长）
+      Serial.println("[EPD] probe: manual BUSY timeline");
+      eink_display_white();
+      epdAsyncProbeBusy(30000, 250);
+      epdAsyncPowerOffNow();
+      epdAsyncClearPending();
     }
     else if (command.startsWith("nvs")) {
       // 读取 NVS 中所有 key 和值

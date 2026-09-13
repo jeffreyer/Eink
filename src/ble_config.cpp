@@ -8,13 +8,8 @@
 #include "time_calibration.h"
 #include "gallery.h"
 #include "battery.h"
-#if defined(INK6)
-#include "eink6.h"
-#elif defined(INK_BW)
-#include "eink_bw.h"
-#else
-#include "Display_EPD_W21.h"
-#endif
+#include "eink_display.h"
+#include "epd_async.h"
 #include <Arduino.h>
 #include <NimBLEDevice.h>
 #include <sys/time.h>
@@ -1359,12 +1354,14 @@ void ble_config_init(void) {
         return;
     }
 
-    #ifdef INK6
-    // 省电：BLE 配置模式不绘制屏幕，按键唤醒进入 BLE 前确保 6 色面板已断电
-    // 并进入深度休眠，避免面板驱动 IC 在 BLE 会话期间持续耗电
-    epdFinishPowerOff();
-    epdClearRefreshPending();
-    #endif
+    // 省电：BLE 配置模式不绘制屏幕，避免面板驱动 IC 在会话期间持续耗电。
+    // - 面板没在刷新（如按键唤醒进 BLE，面板刚 init 过 / 已睡眠）：立即断电 + 面板休眠
+    //   （不能等 BUSY：面板睡着或处于非初始化态时 BUSY 会一直是忙电平）
+    // - 面板正在刷新：不在这里阻塞等待（4 色要 13.5 秒、6 色要 30 秒），
+    //   交给主循环 epdAsyncMaintain() 在刷新结束后补断电
+    if (!epdAsyncIsPending()) {
+        epdAsyncPowerOffNow();
+    }
 
     // 省电：蓝色指示灯改低占空比 PWM（1kHz、5%），替代常亮（常亮约 2~8mA）
     ledcAttach(BLE_LIGHT, 1000, 8);

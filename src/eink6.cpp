@@ -6,18 +6,20 @@
 #include <SPI.h>
 #include "eink6.h"
 #include "GUI_Paint.h"
+#include "epd_async.h"
 
 // 6 色画布：240x240，4bpp 打包（2 像素/字节），供 GUI_Paint 绘制后整帧送屏
 unsigned char BlackImage[ALLSCREEN_BYTES];
 
 
 // Pin assignment - based on board selection
-static int PIN_EPD_MOSI;
-static int PIN_EPD_CLK;
-static int PIN_EPD_BUSY;
-static int PIN_EPD_DC;
-static int PIN_EPD_CS;
-static int PIN_EPD_RST;
+// 默认值 = 当前硬件接线：这些全局在 initPins() 之前（如开机释放引脚保持）也要可用
+static int PIN_EPD_MOSI = 7;
+static int PIN_EPD_CLK = 6;
+static int PIN_EPD_BUSY = 10;
+static int PIN_EPD_DC = 4;
+static int PIN_EPD_CS = 5;
+static int PIN_EPD_RST = 3;
 
 void initPins() {
 
@@ -53,45 +55,49 @@ static const WaterRippleProfile ACTIVE_WATER_RIPPLE_PROFILE = WATER_RIPPLE_NEW;
 static const uint32_t BUSY_TIMEOUT_INIT_MS = 10000;
 static const uint32_t BUSY_TIMEOUT_POWER_MS = 10000;
 static const uint32_t BUSY_TIMEOUT_REFRESH_MS = 40000;
+// 断电/深睡阶段的等待上限：面板已在睡眠或停在非初始化态时，BUSY 可能一直是"忙"
+// 电平（四色板实测唤醒后 BUSY 恒为 0），这里取短值兜底，避免每次补断电白等
+static const uint32_t POWEROFF_WAIT_MS = 2000;
 
-// 系统级异步刷屏：
-// RTC 标记：面板刷新进行中（跨深度休眠保留），唤醒后需完成 Power OFF + 面板休眠
-RTC_DATA_ATTR static bool s_refresh_pending = false;
-static uint32_t s_refresh_start_ms = 0;
+// ====================== 异步刷屏钩子（见 epd_async.h）======================
 
-bool epdIsRefreshPending(void) {
-  return s_refresh_pending;
+// 面板刷新是否已结束（BUSY 回到空闲电平）
+bool epdPanelIsIdle(void) {
+  if (gIgnoreBusy) {
+    return true;
+  }
+  const int busyLevel = gBusyActiveLevelLow ? LOW : HIGH;
+  return digitalRead(PIN_EPD_BUSY) != busyLevel;
 }
 
-void epdClearRefreshPending(void) {
-  s_refresh_pending = false;
-}
-
-// 异步刷新唤醒后：刷新已完成，关闭面板电源并进入面板深度休眠
-void epdFinishPowerOff() {
-  Serial.println("[EPD] stage: finish power off (async refresh)");
-  // 保险：若刷新仍未结束（超长刷新），等待其完成
-  epdWaitBusyStage("Refresh done", BUSY_TIMEOUT_REFRESH_MS);
+// 刷新结束：关闭面板电源并让面板进入深度休眠
+void epdPanelPowerOff(void) {
+  Serial.println("[EPD] stage: power off + panel deep sleep");
+  // 刷新结束的等待已由 epdAsyncPowerOffNow()/epdAsyncMaintain() 处理，这里只断电
   epdWriteCommand(0x02);  // Power OFF
   epdWriteData(0x00);
-  epdWaitBusyStage("Power OFF", BUSY_TIMEOUT_POWER_MS);
+  epdWaitBusyStage("Power OFF", POWEROFF_WAIT_MS);
   delay(20);
   epdEnterDeepSleep();
   Serial.println("[EPD] panel powered off and in deep sleep");
 }
 
-// 主循环兜底：异步刷新后若系统未进入休眠（实时交互 / BLE 等），延迟断电面板
-void epdPanelPowerMaintain(void) {
-  if (!s_refresh_pending) {
-    return;
-  }
-  if (millis() - s_refresh_start_ms >= EPD_PANEL_POWEROFF_DELAY_MS) {
-    Serial.println("[EPD] panel power off (no sleep after refresh)");
-    epdFinishPowerOff();
-    s_refresh_pending = false;
-  }
+int epdPanelBusyRaw(void) {
+  return digitalRead(PIN_EPD_BUSY);
 }
 
+void epdPanelHoldPins(bool hold) {
+  if (hold) {
+    // 休眠前把控制脚拉到空闲电平再保持
+    digitalWrite(PIN_EPD_CS, HIGH);
+    digitalWrite(PIN_EPD_DC, HIGH);
+    digitalWrite(PIN_EPD_RST, HIGH);
+  }
+  const int pins[] = {
+    PIN_EPD_RST, PIN_EPD_DC, PIN_EPD_CS, PIN_EPD_CLK, PIN_EPD_MOSI
+  };
+  epdAsyncHoldPinsImpl(pins, sizeof(pins) / sizeof(pins[0]), hold);
+}
 
 static inline void epdSelect() {
     digitalWrite(PIN_EPD_CS, LOW);
@@ -414,11 +420,7 @@ void epdDisplayImage(const unsigned char* imgData, uint32_t dataLen) {
     Serial.println("[EPD] stage: write frame (image)");
 
     // 同步点：上一帧异步刷新若仍在进行，等待其完成再开始新绘制，避免打断刷新
-    if (s_refresh_pending) {
-        Serial.println("[EPD] sync: waiting previous refresh to finish");
-        epdWaitBusyStage("prev refresh", BUSY_TIMEOUT_REFRESH_MS);
-        s_refresh_pending = false;
-    }
+    epdAsyncWaitPrevious();
 
     epdReset();
     epdInitJD7601();
@@ -451,15 +453,14 @@ void epdDisplayImage(const unsigned char* imgData, uint32_t dataLen) {
     delay(10);
 
     // 系统级异步：发完刷新命令立即返回，MCU 可直接进入深度休眠，
-    // 面板断电由 enter_deep_sleep() 30秒快路径或主循环 epdPanelPowerMaintain() 完成
-    s_refresh_pending = true;
-    s_refresh_start_ms = millis();
-    Serial.println("[EPD] async refresh started");
+    // 面板断电由 epdAsyncPowerOffNow()（定时唤醒）或 epdAsyncMaintain()（未休眠）完成
+    epdAsyncMarkStarted();
 }
 
 // ====================== 显示函数结束 ======================
 
-int init_eink6(){
+// 总线与引脚初始化（不触碰面板，异步补断电唤醒时也需要先建立 SPI 才能发命令）
+static void epdInitBus() {
     initPins();
 
     pinMode(PIN_EPD_BUSY, INPUT);
@@ -476,6 +477,10 @@ int init_eink6(){
     SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0));
 
     Serial.printf("[EPD] boot, BUSY pin now=%d\n", digitalRead(PIN_EPD_BUSY));
+}
+
+int init_eink6(){
+    epdInitBus();
 
     // 重置并初始化
     epdReset();
@@ -495,7 +500,13 @@ int init_eink6(){
 // ====================== 统一显示接口（见 eink_display.h）======================
 
 int eink_display_init(void) {
-    return init_eink6();
+    epdInitBus();
+    // 异步刷屏补断电唤醒：面板正在刷新，不能 reset（会打断刷新），
+    // 本次唤醒只做总线初始化，随后由 epdAsyncPowerOffNow() 断电
+    if (!epdAsyncIsPending()) {
+        epdReset();
+    }
+    return 0;
 }
 
 void eink_display_frame(void) {

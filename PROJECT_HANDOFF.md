@@ -12,7 +12,8 @@
   - **当前为 6 色屏模式（`#define INK6` 已开启）**；换黑白屏注释 `INK6`、打开 `INK_BW`
   - 三个驱动各自整体由宏保护（文件顶部先 `#include "common.h"` 才能看到宏），
     同一时刻只有一个驱动参与编译，避免重复定义 `BlackImage`/`gui_drawtext`
-**刷新时间**: 4色约12秒；6色约30-40秒（驱动内 BUSY 超时上限 40 秒）  
+**刷新时间**: 黑白约2秒；4色约12秒；6色约30-40秒（驱动内 BUSY 超时上限 40 秒）。
+三者都走异步刷屏：发出刷新命令后 MCU 立刻深度休眠，刷新结束由定时唤醒补断电  
 **通信方式**: BLE (NimBLE)  
 **开发环境**: PlatformIO + Arduino Framework  
 **前端**: 微信小程序
@@ -67,7 +68,8 @@
 - 画布：`BlackImage[28800]`（240x240，4bpp），由 `eink6.cpp` 定义
 - 绘制：复用 `GUI_Paint` 的 `Paint_SetScale(7)`（4bpp，2像素/字节，高位在前），
   与 JD7601 帧格式逐字节一致，`lua_hardware_api.cpp` 在 `INK6` 下自动切换
-- 刷新：`display.show()` → `epdDisplayImage()`（写帧 0x10 → 刷新 0x12 → 休眠 0x07）
+- 刷新：`display.show()` → `epdDisplayImage()`（写帧 0x10 → 刷新 0x12 后立即返回，
+  断电与面板休眠由 `epd_async` 调度）
 - 4色屏代码在 `INK6` 下通过 `#ifndef INK6` 整体跳过（`eink.cpp`）
 
 ### Lua 颜色值
@@ -116,9 +118,127 @@ Lua 按键钩子被调用时若模块未加载（按键唤醒跳过了 setup）�
 统一接口（各驱动的 `.cpp` 内实现，见 `include/eink_display.h`）：
 
 - `eink_display_init()`：初始化 SPI 与面板，`setup()` 调用一次
-- `eink_display_frame()`：把 `BlackImage` 整帧刷到屏幕（上电/断电由驱动自理）
+- `eink_display_frame()`：把 `BlackImage` 整帧刷到屏幕（**异步**：发完刷新命令即返回）
 - `eink_display_white()`：全屏刷白
 - `extern unsigned char BlackImage[ALLSCREEN_BYTES]`：当前屏型的画布缓冲
+
+### 异步刷屏调度层（`include/epd_async.h` + `src/epd_async.cpp`）
+
+三种屏共用同一套“发完刷新命令就休眠”的省电机制，驱动只实现两个钩子：
+
+| 钩子 | 作用 |
+|------|------|
+| `epdPanelIsIdle()` | 刷新是否已结束（读 BUSY 空闲电平） |
+| `epdPanelPowerOff()` | 关闭面板电源 + 面板深度休眠（假定刷新已结束） |
+
+调度层提供：
+
+| 接口 | 时机 | 行为 |
+|------|------|------|
+| `epdAsyncMarkStarted()` | 驱动发完刷新命令后 | 置 RTC 标志，函数立即返回 |
+| `epdAsyncIsPending()` | 各处判断 | 是否有刷新进行中（跨深度休眠保持） |
+| `epdAsyncWaitPrevious()` | 新一帧开始前 | 上一帧未刷完先等它结束，避免 reset 打断刷新 |
+| `epdAsyncPowerOffNow()` | 定时唤醒补断电 / 进 BLE 前 | 断电 → 面板休眠（**不等 BUSY**，几十毫秒返回） |
+| `epdAsyncMaintain()` | 主循环 | 未休眠时兜底：刷新结束且过了延迟才断电（**非阻塞**，不拖慢 BLE） |
+| `epdAsyncPrepareSleep()` | 进深度休眠前 | 刷新中则 `gpio_hold` 住面板控制脚，见下 |
+| `epdAsyncReleasePins()` | 开机初始化墨水屏前 | 释放上次休眠保持的引脚 |
+
+完整流程（三个屏型一致）：
+
+1. 模块 `setup` 绘制 → `eink_display_frame()` 发出刷新命令 → 置标志后立即返回；
+2. `enter_deep_sleep()` 发现标志：只启用 `EPD_ASYNC_REFRESH_SLEEP_S` 秒定时唤醒
+   （禁用 GPIO 唤醒，避免按键中途唤醒打断刷新），MCU 立刻休眠；
+3. 定时唤醒后 `setup()` 走快路径：`eink_display_init()` 只初始化总线
+   （**pending 时不 reset 面板**）→ `epdAsyncPowerOffNow()` 直接断电
+   （唤醒时刻按刷新时长选取，**不再依赖 BUSY 判空闲**）→ 清标志 → 继续休眠；
+4. 若没休眠（BLE 交互 / 上电待机）：主循环 `epdAsyncMaintain()` 在刷新结束、
+   且超过 `EPD_PANEL_POWEROFF_DELAY_MS` 后补一次断电；BUSY 读不到空闲电平时，
+   到达 `EPD_ASYNC_FORCE_POWEROFF_MS` 也会兜底断电（非阻塞，不会卡住 loop）。
+
+进入 BLE 前（`ble_config_init`）：面板没在刷新就立即断电 + 面板休眠（按键唤醒进
+BLE 时面板刚 init 过，不断电会持续耗电）。这里**也不能等 BUSY**：面板处于睡眠/非
+初始化态时 BUSY 一直是忙电平（实测进 BLE 时 BUSY=0，白等 3 秒），所以直接走
+`epdAsyncPowerOffNow()`；正在刷新则交给主循环补断电（4 色要 13.5 秒、6 色要 30 秒，
+阻塞会让 BLE 迟迟不广播）。
+
+同理，6 色驱动断电阶段的 BUSY 等待上限从 10 秒收到 `POWEROFF_WAIT_MS`（2 秒）兜底。
+
+注意：异步刷新窗口内**只启用定时唤醒、禁用 GPIO 唤醒**，这段时间（黑白 6 秒 /
+4 色 22 秒 / 6 色 30 秒）按键不会被响应——这是为了避免按键打断刷新，代价与
+6 色屏原有行为一致。
+
+各屏参数（定义在各自驱动头文件，调度层取默认值兜底）：
+
+| 屏型 | 全刷耗时 | `EPD_ASYNC_REFRESH_SLEEP_S` | `EPD_PANEL_POWEROFF_DELAY_MS` | `EPD_ASYNC_WAIT_TIMEOUT_MS` |
+|------|---------|------------------------------|-------------------------------|-----------------------------|
+| 6 色 240x240 | 20~30s | 30 | 3000 | 5000 |
+| 4 色 200x200 | ~13.5s（实测） | 22 | 13000 | 3000 |
+| 黑白 200x200 | ~2s | 6 | 3000 | 3000 |
+
+（`EPD_ASYNC_FORCE_POWEROFF_MS`：未休眠时的兜底断电时间，6 色 40s / 4 色 20s / 黑白 6s）
+
+**BUSY 只是优化，时间才是保证**：定时唤醒路径完全不等 BUSY；主循环兜底路径优先看
+BUSY，读不到空闲电平则按时间兜底。所以即便某块屏 BUSY 引脚不可读，也不会出现长时间
+卡住或面板一直通电。
+
+**四色板实测（`probe` 命令 + 唤醒探针）**：醒着刷一次全白 **13.5 秒**完成
+（BUSY 忙=0 / 空闲=1，极性正确、引脚正常）；但 MCU 深度休眠期间面板控制 IC 会
+进入非初始化状态，唤醒后 BUSY 一直为 0，**而屏幕内容显示正确**（墨水屏双稳态，
+图像不依赖 IC 供电/状态）。因此四色屏的补断电流程改为：
+
+1. 唤醒后不等 BUSY，也不做整屏初始化（`lcd_chkstatus()` 是死等，绝不能进）；
+2. `EPD_reset_only()` 只做一次复位（不等 BUSY），把控制 IC 拉回已知状态；
+3. `EPD_poweroff_sleep()` 发 0x02 断电 + 0x07 面板深睡。
+
+复位不会影响已显示画面（双稳态），但能保证断电/深睡命令不被忽略。四色刷新窗口据此
+放宽到 22 秒（实测 13.5 秒 + 余量）。
+
+`EPD_ASYNC_WAIT_TIMEOUT_MS` 是“等 BUSY 变空闲”的兜底上限：唤醒时刻本就选在刷新完成
+之后，这里只防意外，超时后**照常断电**（面板会在下一帧初始化时重新复位，不会损坏）。
+
+### 深度休眠期间保持面板控制脚（`gpio_hold`）
+
+MCU 深度休眠时 GPIO 会浮空：EPD 的 RST/CS/SCK/MOSI 浮空可能被干扰，甚至把面板拉进
+复位态，表现就是**唤醒后 BUSY 一直报忙**、补断电流程只能走到超时（曾出现 60 秒延迟）。
+因此在异步刷屏进入休眠前（`epdAsyncPrepareSleep()`）把 RST/DC/CS/SCK/MOSI 拉到空闲电平
+并 `gpio_hold_en()` + `gpio_deep_sleep_hold_en()` 固定住，开机时 `epdAsyncReleasePins()`
+（`main.cpp` 里，早于 SPI 初始化）释放。
+
+补断电 / 进 BLE 前都不再等 BUSY，因此日常日志不会再出现 `wait idle`。唯一还会
+等 BUSY 的地方是“新一帧开始前，上一帧仍在刷新”的同步点（`epdAsyncWaitPrevious()`），
+它同样带短超时并打印原始电平：
+
+```
+[EPD] sync: waiting previous refresh to finish
+[EPD] wait idle: BUSY raw=0                 # 进入等待时 BUSY 读数
+[EPD] wait idle timeout (3000 ms), BUSY raw=0 -> power off anyway
+```
+
+### BUSY 时间线探针（临时诊断）
+
+四色板实测“唤醒后 BUSY 恒为 0”（尽管画面已刷新完成），需要用探针确认 BUSY 的
+真实空闲极性与刷新时长。两处探针由 `EPD_PROBE_BUSY_ON_BOOT` 控制，**默认已置 0**
+（日常运行不打印、不白屏刷屏）：
+
+- 置 1 时：上电冷启动自动跑一次时间线，并且每次唤醒打印唤醒后 BUSY 原始电平
+  （在任何 GPIO/SPI 初始化前、初始化后各一次）；
+- **串口命令 `probe`**：不受开关影响，随时手动重跑时间线（换新屏幕板卡时用来确认
+  刷新时长与 BUSY 极性）。
+
+输出形如：
+
+```
+[EPD] probe: cold boot, measuring BUSY timeline
+[EPD] probe: t=0 ms BUSY=0 idle=0
+[EPD] probe: t=1000 ms BUSY=0 (stable)
+...
+[EPD] probe: t=12000 ms BUSY=1 idle=1     ← 翻转点 = 真实刷新时长 + 空闲电平
+[EPD] probe: BUSY timeline end
+```
+
+据此可判断：翻转后为 1 → 现有 `epdPanelIsIdle()`（`BUSY==1`）正确，问题只在
+“唤醒时刷新确实还没结束”；翻转后为 0 → 该屏空闲电平为低，把 `epdPanelIsIdle()`
+反过来；始终不变 → 该脚没有反映刷新状态（走线/引脚不对），保持纯时间兜底。
 
 ### 1.54 寸黑白屏（`INK_BW`）
 
@@ -129,8 +249,9 @@ Lua 按键钩子被调用时若模块未加载（按键唤醒跳过了 setup）�
 - 引脚与 6 色屏硬件一致（MOSI=7 / CLK=6 / BUSY=10 / DC=4 / CS=5 / RST=3），
   定义集中在 `include/eink_bw.h`，换硬件只改这一处
 - 刷新流程：`0x12 SWRESET` → 驱动输出/数据入口/窗口/Border/温度/LUT →
-  `0x24` 写帧 → `0x22 0xC7 + 0x20` 刷新并等 BUSY → `0x10 0x01` 面板深度休眠
-  （同步全刷，约 2 秒；无 6 色屏的异步刷屏/断电兜底逻辑）
+  `0x24` 写帧 → `0x22 0xC7 + 0x20` 触发刷新后**立即返回**（约 2 秒刷新期间 MCU
+  进入深度休眠，5 秒后唤醒补断电）；`epdPanelPowerOff()` 里 `0x10 0x01` 让面板
+  深度休眠
 - `gui_drawtext()` 调试命令、"white" 串口命令均已实现
 
 **颜色映射（Lua 颜色值 → 黑白屏）**：`1 白 → 白`、`2 黄 → 浅灰抖动`、
@@ -164,8 +285,9 @@ src/
 ├── eink.cpp              # 4色屏驱动封装（INK6/INK_BW 下不编译）
 ├── eink6.cpp             # 6色屏 JD7601 驱动 + 6色画布 BlackImage
 ├── eink_bw.cpp           # 黑白屏 SSD1681 驱动 + 1bpp 画布 BlackImage
+├── epd_async.cpp         # 异步刷屏调度（RTC pending 标志 / 补断电 / 兜底）
 ├── lua_hardware_api.cpp  # Lua display API（绘制/中文渲染/刷新）
-├── Display_EPD_W21.cpp   # 4色屏底层驱动
+├── Display_EPD_W21.cpp   # 4色屏底层驱动（PIC_write_ram / EPD_update_async / 断电休眠）
 └── GUI/                  # GUI_Paint 绘制库（Scale 2=1bpp, 4=2bpp, 7=4bpp）
 
 include/
@@ -178,6 +300,7 @@ include/
 ├── eink6.h               # 6色屏参数（240x240）+ 颜色常量
 ├── eink_bw.h             # 黑白屏参数（200x200, 1bpp）+ 引脚
 ├── eink_display.h        # 三种屏型统一显示接口
+├── epd_async.h           # 异步刷屏调度接口 + 各屏参数
 ├── image.h               # 6色测试图（调试用）
 └── GUI_Paint.h
 
@@ -618,24 +741,15 @@ JSON 配置定义数组：`display_mode`（显示模式）、`cycle_interval`（
     （**分钟**，1~1440，名言/倒计时通用；NVS 键名最长15字符，故配置键须 ≤15），
     `refresh`（小时）仅作旧版倒计时配置兼容（`interval` 未保存时回退），
     定时唤醒后 `setup()` 重绘并立即休眠；异步刷屏期间 MCU 直接休眠，
-    30 秒后唤醒完成面板断电，再按模块周期继续休眠
-- **系统级异步刷屏（仅 INK6）**：JD7601 发完 0x12 刷新命令后由控制器内部完成刷屏，
-  MCU 无需等待 BUSY。`epdDisplayImage` 对**所有模块统一异步**：发完刷新命令立即返回
-  并置 RTC 标志 `s_refresh_pending`，不依赖任何模块特判。
-  - 若随后进入深度休眠：`enter_deep_sleep()` 检测到该标志只启用 30 秒定时唤醒
-    （`EPD_ASYNC_REFRESH_SLEEP_S`，禁用 GPIO 唤醒避免打断刷新）；30 秒后唤醒走
-    `setup()` 快路径：`epdFinishPowerOff()` 完成 Power OFF + 面板休眠，清标志后按
-    模块周期重新进入深度休眠。
-  - 若未休眠（实时交互 / BLE / 上电后待机）：主循环 `epdPanelPowerMaintain()` 在
-    `EPD_PANEL_POWEROFF_DELAY_MS`（3秒）后延迟断电面板。
+    面板刷新结束后由定时唤醒完成断电，再按模块周期继续休眠
+- **系统级异步刷屏（4色 / 6色 / 黑白屏统一）**：见下方“异步刷屏调度层”
+  （`include/epd_async.h`）。面板刷新由控制器内部定时序，`eink_display_frame()`
+  发完刷新命令立即返回并置 RTC 标志 `s_refresh_pending`，不依赖任何模块特判。
   - **BUSY 等待省电**：`epdWaitBusy` 轮询间隔从 `delay(1)` 改为 `delay(20)`——
     tickless idle 入睡阈值为 8ms（`FREERTOS_IDLE_TIME_BEFORE_SLEEP=8` @ 1000Hz），
     1ms 轮询让 CPU 永远睡不进 light sleep，等待面板 BUSY（如 30 秒断电快路径最多
     等 40 秒）时 CPU 全程活跃约 15mA；20ms 轮询可进入 light sleep，
     该阶段电流从 ~18mA 降至面板自身的 3~5mA。主循环 `delay(10)` 同步改为 `delay(20)`
-  - 连续绘制保护：新绘制开始时若上一帧刷新仍在进行，`epdDisplayImage` 先等待
-    BUSY 完成再重置面板，避免打断刷新。
-  4色屏保持同步刷屏（沿用旧驱动）。
 
 **时间与时区**：
 - 时间戳（UTC）由 BLE `sync_time` 同步，`TimeCalibration` 存 RTC 内存（深睡保持）

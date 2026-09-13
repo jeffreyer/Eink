@@ -13,6 +13,7 @@
 #include "cmd_handler.h"
 #include <SPIFFS.h>
 #include "eink_display.h"
+#include "epd_async.h"
 
 // Button status enumeration for better code readability
 enum ButtonStatus {
@@ -290,6 +291,19 @@ void check_btn(){
 void setup() {
   setCpuFrequencyMhz(80);
   Serial.begin(115200);
+
+#if EPD_PROBE_BUSY_ON_BOOT
+  // ==== 临时诊断：唤醒后、任何 GPIO/SPI 初始化之前先读 BUSY 原始电平 ====
+  // 1 = 面板当时已空闲（说明面板没问题，是唤醒后的初始化动作干扰了它）
+  // 0 = 面板当时仍处于忙态（刷新在休眠期间没走完）
+  delay(50);
+  Serial.printf("[EPD] wake probe: cause=%d pending=%d\n",
+                (int)esp_sleep_get_wakeup_cause(), epdAsyncIsPending() ? 1 : 0);
+  Serial.printf("[EPD] wake probe: BUSY raw=%d (t=0 ms)\n", epdPanelBusyRaw());
+  delay(300);
+  Serial.printf("[EPD] wake probe: BUSY raw=%d (t=300 ms)\n", epdPanelBusyRaw());
+#endif
+
   pinMode(KEY_UP, INPUT);
   pinMode(KEY_DOWN, INPUT);
   pinMode(BLE_LIGHT, OUTPUT);
@@ -301,7 +315,25 @@ void setup() {
   // 避免 BLE 会话中首次绘制中文时堆不足导致全部显示为 '?'
   lua_hardware_preload_gb2312();
 
+  // 释放上次异步刷屏休眠期间保持的面板控制引脚（必须在初始化 SPI 之前）
+  epdAsyncReleasePins();
+
   eink_display_init();
+
+#if EPD_PROBE_BUSY_ON_BOOT
+  Serial.printf("[EPD] wake probe: BUSY raw=%d (after init)\n", epdPanelBusyRaw());
+
+  // ==== 临时诊断（确认该屏 BUSY 读法，定位完可删除本段）====
+  // 上电冷启动时触发一次全白刷新，打印 BUSY 原始电平时间线：
+  // 正常应是"刷新期间某个电平、刷新结束后翻到另一个电平并稳定"
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_UNDEFINED) {
+    Serial.println("[EPD] probe: cold boot, measuring BUSY timeline");
+    eink_display_white();
+    epdAsyncProbeBusy(30000, 250);
+    epdAsyncPowerOffNow();
+    epdAsyncClearPending();
+  }
+#endif
 
   // // 6. 检查并执行自动 OTA 更新（如果有 firmware.bin）
   // if (auto_ota_check_and_update()) {
@@ -322,16 +354,15 @@ void setup() {
 
   page_index = module_registry_normalize_index(page_index);
 
-  #ifdef INK6
-  // 异步刷新唤醒：30 秒前休眠时面板仍在刷新，本次唤醒仅完成面板断电后继续休眠
-  // （不重绘屏幕，避免打断刷新）
-  if (epdIsRefreshPending()) {
-    Serial.println("[EPD] async refresh wake: finishing power off");
-    epdFinishPowerOff();
-    epdClearRefreshPending();
+  // 异步刷屏唤醒：上次休眠时面板仍在刷新。定时唤醒时刻就是按刷新时长选的，
+  // 此刻刷新窗口已经过去，直接断电 + 面板休眠即可（不再依赖 BUSY 电平判断，
+  // 部分面板/接线读不到空闲电平，会白白多等一个超时）
+  if (epdAsyncIsPending()) {
+    Serial.println("[EPD] async refresh wake: refresh window elapsed, power off panel");
+    epdAsyncPowerOffNow();
+    epdAsyncClearPending();
     enter_deep_sleep();
   }
-  #endif
 
   // 电池保护：每次开机（上电 / 按键 / 定时唤醒）都先检测电压。
   // 低于 3.1V 时不执行任何模块逻辑（不绘制、不进 BLE 配置），直接深度休眠；
@@ -382,10 +413,8 @@ void loop() {
 
   check_btn();
 
-  #ifdef INK6
-  // 面板断电兜底：异步刷新后若系统未进入休眠（实时交互/BLE），延迟断电面板
-  epdPanelPowerMaintain();
-  #endif
+  // 面板断电兜底：异步刷新后若系统未进入休眠（实时交互/BLE），刷新结束即断电
+  epdAsyncMaintain();
 
   // 休眠唤醒长按切模块：KEY_DOWN 释放后进入深度休眠
   if (s_sleep_after_wake_switch && digitalRead(KEY_DOWN) != LOW) {

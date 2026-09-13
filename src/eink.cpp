@@ -5,22 +5,24 @@
 #else
 
 #include <SPI.h>
+#include <string.h>
 //EPD
 #include "Display_EPD_W21_spi.h"
 #include "Display_EPD_W21.h"
 #include "eink.h"
 #include "GUI_Paint.h"
+#include "epd_async.h"
 
 unsigned char BlackImage[ALLSCREEN_BYTES];//Define canvas space 
 
 int init_eink(){
-    pinMode(2, INPUT);  //BUSY
-    pinMode(3, OUTPUT); //RES 
-    pinMode(4, OUTPUT); //DC   
-    pinMode(5, OUTPUT); //CS   
+    pinMode(EPD_W21_BUSY_PIN, INPUT);  //BUSY
+    pinMode(EPD_W21_RST_PIN, OUTPUT);  //RES
+    pinMode(EPD_W21_DC_PIN, OUTPUT);   //DC
+    pinMode(EPD_W21_CS_PIN, OUTPUT);   //CS
     //SPI
     SPI.beginTransaction(SPISettings(10000000, MSBFIRST, SPI_MODE0)); 
-    SPI.begin(6,-1,7,5);
+    SPI.begin(EPD_W21_SCK_PIN,-1,EPD_W21_MOSI_PIN,EPD_W21_CS_PIN);
     // SPI.begin ();  
     return 0;
 }
@@ -133,21 +135,64 @@ int ink_draw_test(){
 
 int eink_display_init(void){
     init_eink();
-    EPD_init_Fast2();
-    EPD_sleep();
+    // 异步刷屏补断电唤醒：面板正在刷新，不能 reset（会打断刷新），
+    // 本次唤醒只做总线初始化，随后由 epdAsyncPowerOffNow() 断电
+    if (!epdAsyncIsPending()) {
+        EPD_init_Fast2();
+        EPD_sleep();
+    }
     return 0;
 }
 
+// 异步刷屏：写 RAM → 触发刷新后立即返回，刷新期间 MCU 直接进入深度休眠
 void eink_display_frame(void){
+    // 上一帧刷新若仍在进行，先等它结束，避免 reset 打断刷新
+    epdAsyncWaitPrevious();
+
     EPD_init_Fast2();
-    PIC_display(BlackImage);
-    EPD_sleep();
+    PIC_write_ram(BlackImage);
+    EPD_update_async();
+    epdAsyncMarkStarted();
 }
 
 void eink_display_white(void){
-    EPD_init_Fast2();
-    Display_All_White();
-    EPD_sleep();
+    // 画布色码 0x00 = 白（PIC_write_ram 内会映射为面板码）
+    memset(BlackImage, 0x00, ALLSCREEN_BYTES);
+    eink_display_frame();
+}
+
+// ====================== 异步刷屏钩子（见 epd_async.h）======================
+
+bool epdPanelIsIdle(void){
+    // BUSY 高 = 空闲，刷新已结束
+    return isEPD_W21_BUSY == 1;
+}
+
+int epdPanelBusyRaw(void){
+    return digitalRead(EPD_W21_BUSY_PIN);
+}
+
+void epdPanelHoldPins(bool hold){
+    if (hold) {
+        // 休眠前把控制脚拉到空闲电平再保持（CS/DC 高、RST 高）
+        digitalWrite(EPD_W21_CS_PIN, HIGH);
+        digitalWrite(EPD_W21_DC_PIN, HIGH);
+        digitalWrite(EPD_W21_RST_PIN, HIGH);
+    }
+    static const int pins[] = {
+        EPD_W21_RST_PIN, EPD_W21_DC_PIN, EPD_W21_CS_PIN,
+        EPD_W21_SCK_PIN, EPD_W21_MOSI_PIN
+    };
+    epdAsyncHoldPinsImpl(pins, sizeof(pins) / sizeof(pins[0]), hold);
+}
+
+void epdPanelPowerOff(void){
+    // MCU 休眠期间面板控制脚虽被保持，但控制 IC 可能已不在初始化状态
+    // （实测唤醒后 BUSY 恒为 0，此时直接发 0x02/0x07 可能被忽略）。
+    // 先复位把它拉回已知状态（只复位、不等 BUSY，避免卡死），再断电 + 面板深睡。
+    // 墨水屏双稳态，复位不会影响已显示的画面。
+    EPD_reset_only();
+    EPD_poweroff_sleep();
 }
 
 #endif // INK6 / INK_BW
