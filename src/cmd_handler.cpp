@@ -7,12 +7,7 @@
 #include <Preferences.h>
 #include <sys/stat.h>
 #include <dirent.h>
-#ifdef INK6
-#include "eink6.h"
-#else
-#include "eink.h"
-#include "Display_EPD_W21.h"
-#endif
+#include "eink_display.h"
 
 void check_cmd(){
   if (Serial.available() > 0) {
@@ -195,13 +190,7 @@ void check_cmd(){
       Serial.printf("[BLE] Device unbound, password regenerated");
     }
     else if (command.startsWith("white")) {
-#ifdef INK6
-      epdDisplaySolid(COLOR_WHITE);
-#else
-      EPD_init_Fast2();
-      Display_All_White();
-      EPD_sleep();
-#endif
+      eink_display_white();
     }
     else if (command.startsWith("nvs")) {
       // 读取 NVS 中所有 key 和值

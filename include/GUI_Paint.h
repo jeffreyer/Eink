@@ -77,6 +77,12 @@ typedef enum {
 #define  GRAY3 0x01 //gray
 #define  GRAY4 0x00 //white
 
+// 黑白屏（Scale=2）的中间灰：Paint_SetPixel 用 4x4 Bayer 有序抖动表达，
+// 让原本的黄色等浅色在黑白屏上仍可辨识（不会直接消失成白底）
+#define  GRAY_LIGHT 0xC0  // 约 75% 白
+#define  GRAY_MID   0x80  // 约 50% 白
+#define  GRAY_DARK  0x40  // 约 25% 白
+
 /**
  * The size of the point
 **/
@@ -165,4 +171,3 @@ void Paint_DrawBitMap_Block(const unsigned char* image_buffer, UBYTE Region);
 //Color setting
 void Paint_Color_Setting(void);
 #endif
-

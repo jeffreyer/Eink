@@ -170,8 +170,22 @@ void Paint_SetPixel(UWORD Xpoint, UWORD Ypoint, UWORD Color)
         Rdata = Paint.Image[Addr];
         if(Color == 0x00) //BLACK
             Paint.Image[Addr] = Rdata & ~(0x80 >> (X % 8));
-        else
+        else if(Color == 0xFF) //WHITE
             Paint.Image[Addr] = Rdata | (0x80 >> (X % 8));
+        else {
+            // 中间灰：4x4 Bayer 有序抖动（黑白屏用灰度表现黄色等浅色）
+            static const uint8_t bayer4[4][4] = {
+                {  0,  8,  2, 10 },
+                { 12,  4, 14,  6 },
+                {  3, 11,  1,  9 },
+                { 15,  7, 13,  5 },
+            };
+            uint8_t threshold = (uint8_t)(bayer4[Y & 3][X & 3] * 17);
+            if(Color > threshold)
+                Paint.Image[Addr] = Rdata | (0x80 >> (X % 8));
+            else
+                Paint.Image[Addr] = Rdata & ~(0x80 >> (X % 8));
+        }
     }else if(Paint.Scale == 4){
         Addr = X / 4 + Y * Paint.WidthByte;
         Color = Color % 4;//Guaranteed color scale is 4  --- 0~3

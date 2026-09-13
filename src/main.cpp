@@ -12,12 +12,7 @@
 #include "battery.h"
 #include "cmd_handler.h"
 #include <SPIFFS.h>
-#ifdef INK6
-#include "eink6.h"
-#else
-#include "eink.h"
-#include "Display_EPD_W21.h"
-#endif
+#include "eink_display.h"
 
 // Button status enumeration for better code readability
 enum ButtonStatus {
@@ -306,13 +301,7 @@ void setup() {
   // 避免 BLE 会话中首次绘制中文时堆不足导致全部显示为 '?'
   lua_hardware_preload_gb2312();
 
-  #ifdef INK6
-  init_eink6();
-  #else
-  init_eink();
-  EPD_init_Fast2();
-  EPD_sleep();
-  #endif
+  eink_display_init();
 
   // // 6. 检查并执行自动 OTA 更新（如果有 firmware.bin）
   // if (auto_ota_check_and_update()) {

@@ -1,7 +1,7 @@
 #include "common.h"
 
-#ifdef INK6
-// 6 色屏模式：4 色驱动与画布不再编译，BlackImage 由 eink6.cpp 提供
+#if defined(INK6) || defined(INK_BW)
+// 6 色屏 / 黑白屏模式：4 色驱动与画布不再编译，BlackImage 由对应驱动提供
 #else
 
 #include <SPI.h>
@@ -129,4 +129,25 @@ int ink_draw_test(){
     return 0;
 }
 
-#endif // INK6
+// ====================== 统一显示接口（见 eink_display.h）======================
+
+int eink_display_init(void){
+    init_eink();
+    EPD_init_Fast2();
+    EPD_sleep();
+    return 0;
+}
+
+void eink_display_frame(void){
+    EPD_init_Fast2();
+    PIC_display(BlackImage);
+    EPD_sleep();
+}
+
+void eink_display_white(void){
+    EPD_init_Fast2();
+    Display_All_White();
+    EPD_sleep();
+}
+
+#endif // INK6 / INK_BW

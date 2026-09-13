@@ -8,8 +8,10 @@
 #include "time_calibration.h"
 #include "gallery.h"
 #include "battery.h"
-#ifdef INK6
+#if defined(INK6)
 #include "eink6.h"
+#elif defined(INK_BW)
+#include "eink_bw.h"
 #else
 #include "Display_EPD_W21.h"
 #endif

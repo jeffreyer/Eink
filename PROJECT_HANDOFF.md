@@ -5,13 +5,13 @@
 这是一个基于ESP32-C3的墨水屏设备项目，包含设备端固件和微信小程序前端。设备通过BLE与小程序通信，支持模块化配置和相册管理功能。
 
 **设备型号**: MiniEink (Adafruit QT Py ESP32-C3)  
-**显示屏**: 两个版本
-- 4色屏（默认）：200x200（黑、白、黄、红）
-- 6色屏（`INK6` 宏）：240x240 JD7601（黑、白、黄、红、蓝、绿），1.54寸
-  - `INK6` 在 `include/common.h` 中定义/注释切换；**当前为 6 色屏模式（已开启）**
-  - `eink6.cpp` 整体由 `#ifdef INK6` 保护（文件顶部先 `#include "common.h"`
-    才能看到该宏），4 色构建时不参与编译（避免与 `eink.cpp` 重复定义
-    `BlackImage`/`gui_drawtext`）
+**显示屏**: 三个版本（`include/common.h` 中三选一）
+- 4色屏（都不定义宏）：200x200 2bpp（黑、白、黄、红）
+- 6色屏（`INK6` 宏）：1.54寸 240x240 JD7601 4bpp（黑、白、黄、红、蓝、绿）
+- 黑白屏（`INK_BW` 宏）：1.54寸 200x200 SSD1681 1bpp（黑、白）
+  - **当前为 6 色屏模式（`#define INK6` 已开启）**；换黑白屏注释 `INK6`、打开 `INK_BW`
+  - 三个驱动各自整体由宏保护（文件顶部先 `#include "common.h"` 才能看到宏），
+    同一时刻只有一个驱动参与编译，避免重复定义 `BlackImage`/`gui_drawtext`
 **刷新时间**: 4色约12秒；6色约30-40秒（驱动内 BUSY 超时上限 40 秒）  
 **通信方式**: BLE (NimBLE)  
 **开发环境**: PlatformIO + Arduino Framework  
@@ -92,12 +92,60 @@ Lua 按键钩子被调用时若模块未加载（按键唤醒跳过了 setup）�
 
 ### BLE 状态字段
 
-`get_status` 新增 `"ink": 6`（4色屏为 4），小程序据此选择图片格式
-（6色：240x240 4bpp / 28,800 字节；4色：200x200 2bpp / 10,000 字节）。
+`get_status` 回传 `"ink"` 为墨水屏色数（6 / 4 / 2），小程序据此选择图片格式
+（6色：240x240 4bpp / 28,800 字节；4色：200x200 2bpp / 10,000 字节；
+黑白：200x200 1bpp / 5,000 字节）。
 
 **电量字段**：状态 JSON 只回传 `"battery_mv"`（分压后电压，分压系数2），
 百分比由前端自行换算（3300mV~4200mV → 0-100%，`bluetooth.js applyBatteryPercent()`）。
 首次状态请求时触发一次 ADC 采样。
+
+---
+
+## 墨水屏驱动（三选一）与统一接口
+
+三种屏型通过 `include/common.h` 里的宏切换，调用点统一走 `include/eink_display.h`
+暴露的接口，不再各自写条件编译：
+
+| 屏型 | 宏 | 帧缓冲 | 驱动实现 |
+|------|-----|--------|----------|
+| 4 色 200x200 2bpp | 无 | `BlackImage[10000]` | `eink.cpp` + `Display_EPD_W21*.cpp` |
+| 6 色 240x240 4bpp | `INK6` | `BlackImage[28800]` | `eink6.cpp` |
+| 黑白 200x200 1bpp | `INK_BW` | `BlackImage[5000]` | `eink_bw.cpp`、`eink_bw.h` |
+
+统一接口（各驱动的 `.cpp` 内实现，见 `include/eink_display.h`）：
+
+- `eink_display_init()`：初始化 SPI 与面板，`setup()` 调用一次
+- `eink_display_frame()`：把 `BlackImage` 整帧刷到屏幕（上电/断电由驱动自理）
+- `eink_display_white()`：全屏刷白
+- `extern unsigned char BlackImage[ALLSCREEN_BYTES]`：当前屏型的画布缓冲
+
+### 1.54 寸黑白屏（`INK_BW`）
+
+- 控制器 SSD1681 兼容，1bpp（1 字节 8 像素，**bit=1 为白**），帧 5000 字节
+- 驱动移植自 `ESP32-C6-ePaper-1.54` 例程 `port_display.cpp`，去掉了 LVGL 与
+  `esp_lcd_panel_io`，改用项目统一的 Arduino SPI + GPIO；全刷波形表（159 字节）
+  原样保留
+- 引脚与 6 色屏硬件一致（MOSI=7 / CLK=6 / BUSY=10 / DC=4 / CS=5 / RST=3），
+  定义集中在 `include/eink_bw.h`，换硬件只改这一处
+- 刷新流程：`0x12 SWRESET` → 驱动输出/数据入口/窗口/Border/温度/LUT →
+  `0x24` 写帧 → `0x22 0xC7 + 0x20` 刷新并等 BUSY → `0x10 0x01` 面板深度休眠
+  （同步全刷，约 2 秒；无 6 色屏的异步刷屏/断电兜底逻辑）
+- `gui_drawtext()` 调试命令、"white" 串口命令均已实现
+
+**颜色映射（Lua 颜色值 → 黑白屏）**：`1 白 → 白`、`2 黄 → 浅灰抖动`、
+`0/3/4/5 → 黑`。抖动由 `GUI_Paint` 的 Scale=2 分支实现（4x4 Bayer 有序抖动，
+中间灰常量 `GRAY_LIGHT/GRAY_MID/GRAY_DARK` 定义在 `include/GUI_Paint.h`），
+这样原本用黄色的高亮块在黑白屏上不会直接消失。
+
+**前端已配套（小程序）**：设备上报 `"ink": 2`，图片格式为 200x200 1bpp =
+**5000 字节**，`bit=1` 白、`bit=0` 黑。前端统一从 `app.getInkSpec()` 取规格：
+
+| 位置 | 改动 |
+|------|------|
+| `app.js` | 新增 `getInkSpec()`：按 `ink` 返回 `{width,height,bits,bytes,isMono}`（6→240/4bit/28800，2→200/1bit/5000，4→200/2bit/10000） |
+| `pages/image-editor` | 黑白屏用 2 色色板（白 `0x01`/黑 `0x00`）+ 亮度阈值 128 + 误差扩散产生灰阶；按 1bpp 高位在前打包；预览标题为“黑白预览”，隐藏无意义的“冷暖”滑块 |
+| `pages/gallery` | 缩略图解码支持 1bpp；缓存键改为按屏型隔离（`gallery_image_cache_v3_ink<色数>`），换屏后不再沿用旧格式缩略图 |
 
 ---
 
@@ -112,12 +160,13 @@ src/
 ├── cmd_handler.cpp       # 串口命令处理器（含 white/dis 调试命令）
 ├── module_registry.cpp   # 模块注册表（含 Lua 动态模块加载）
 ├── sleep_manager.cpp     # 休眠管理（深度睡眠，KEY_UP/KEY_DOWN 唤醒）
-├── gallery.cpp           # 相册功能（含 2bpp/4bpp 旋转）
-├── eink.cpp              # 4色屏驱动封装（INK6 下不编译）
+├── gallery.cpp           # 相册功能（含 1bpp/2bpp/4bpp 旋转）
+├── eink.cpp              # 4色屏驱动封装（INK6/INK_BW 下不编译）
 ├── eink6.cpp             # 6色屏 JD7601 驱动 + 6色画布 BlackImage
+├── eink_bw.cpp           # 黑白屏 SSD1681 驱动 + 1bpp 画布 BlackImage
 ├── lua_hardware_api.cpp  # Lua display API（绘制/中文渲染/刷新）
 ├── Display_EPD_W21.cpp   # 4色屏底层驱动
-└── GUI/                  # GUI_Paint 绘制库（Scale 4=2bpp, Scale 7=4bpp）
+└── GUI/                  # GUI_Paint 绘制库（Scale 2=1bpp, 4=2bpp, 7=4bpp）
 
 include/
 ├── ble_config.h          # BLE接口定义
@@ -127,6 +176,8 @@ include/
 ├── gallery.h
 ├── eink.h                # 4色屏参数（200x200）
 ├── eink6.h               # 6色屏参数（240x240）+ 颜色常量
+├── eink_bw.h             # 黑白屏参数（200x200, 1bpp）+ 引脚
+├── eink_display.h        # 三种屏型统一显示接口
 ├── image.h               # 6色测试图（调试用）
 └── GUI_Paint.h
 
@@ -147,7 +198,7 @@ pages/
 ├── modules/              # 模块列表页（首页TabBar）
 ├── module-config/        # 模块配置详情页
 ├── gallery/              # 相册管理页（仅MiniEink设备，TabBar）
-├── image-editor/         # 图片编辑页（按设备 ink 字段选 4色/6色格式）
+├── image-editor/         # 图片编辑页（按设备 ink 字段选黑白/4色/6色格式）
 ├── device-connect/       # 设备扫描连接页
 ├── market/               # 模块市场页（TabBar）
 └── profile/              # 个人中心页（TabBar）

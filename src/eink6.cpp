@@ -492,6 +492,20 @@ int init_eink6(){
     return 0;
 }
 
+// ====================== 统一显示接口（见 eink_display.h）======================
+
+int eink_display_init(void) {
+    return init_eink6();
+}
+
+void eink_display_frame(void) {
+    epdDisplayImage(BlackImage, ALLSCREEN_BYTES);
+}
+
+void eink_display_white(void) {
+    epdDisplaySolid(COLOR_WHITE);
+}
+
 // void setup() {
 //     Serial.begin(115200);
 //     delay(300);

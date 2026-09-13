@@ -10,12 +10,7 @@
 #include "time_calibration.h"
 #include "GUI_Paint.h"
 #include "common.h"
-#ifdef INK6
-#include "eink6.h"
-#else
-#include "eink.h"
-#include "Display_EPD_W21.h"
-#endif
+#include "eink_display.h"
 
 extern "C" {
 #include "lua.h"
@@ -204,6 +199,16 @@ static UWORD lua_color_to_paint(int color) {
     case 0:
     default: return NIBBLE_BLACK;   // 黑
   }
+#elif defined(INK_BW)
+  // 黑白屏：浅色（黄）用抖动灰表现，深色（红/蓝/绿）转黑，保证内容可辨识
+  switch (color) {
+    case 1:  return WHITE;       // 白
+    case 2:  return GRAY_LIGHT;  // 黄 -> 浅灰抖动
+    case 0:
+    case 3:
+    case 4:
+    default: return BLACK;       // 黑
+  }
 #else
   switch (color) {
     case 1:  return WHITE0;   // 白
@@ -216,17 +221,23 @@ static UWORD lua_color_to_paint(int color) {
 }
 
 // 画布“白底”颜色（4色屏为 2bit 白，6色屏为 4bit 白半字节）
-#ifdef INK6
+#if defined(INK6)
 #define PAINT_BG_WHITE NIBBLE_WHITE
+#elif defined(INK_BW)
+#define PAINT_BG_WHITE WHITE
 #else
 #define PAINT_BG_WHITE WHITE0
 #endif
 
 static void display_prepare_canvas() {
-#ifdef INK6
+#if defined(INK6)
   // 6 色屏：240x240，4bpp（2 像素/字节），直接对应 JD7601 帧格式
   Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, PAINT_BG_WHITE);
   Paint_SetScale(7);
+#elif defined(INK_BW)
+  // 黑白屏：200x200，1bpp（8 像素/字节）
+  Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, PAINT_BG_WHITE);
+  Paint_SetScale(2);
 #else
   Paint_NewImage(BlackImage, EPD_WIDTH, EPD_HEIGHT, 0, WHITE0);
   Paint_SetScale(4);
@@ -394,13 +405,7 @@ void lua_hardware_draw_utf8(int x, int y, const char* str, int size, int color) 
 // display.show() -> 刷新到墨水屏（约12秒）
 static int lua_display_show(lua_State* L) {
   display_prepare_canvas();
-#ifdef INK6
-  epdDisplayImage(BlackImage, ALLSCREEN_BYTES);
-#else
-  EPD_init_Fast2();
-  PIC_display(BlackImage);
-  EPD_sleep();
-#endif
+  eink_display_frame();
   return 0;
 }
 

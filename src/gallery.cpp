@@ -1,12 +1,7 @@
 #include "gallery.h"
 #include "common.h"
-#ifdef INK6
-#include "eink6.h"
-#else
-#include "Display_EPD_W21.h"
 #include "GUI_Paint.h"
-#include "eink.h"
-#endif
+#include "eink_display.h"
 #include <SPIFFS.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -14,20 +9,16 @@
 #include "ble_config.h"
 #include "lua_hardware_api.h"
 
-// 墨水屏尺寸定义
-#ifdef INK6
+// 墨水屏尺寸定义（黑白屏 / 四色屏均 200x200，由对应驱动头文件提供）
+#if defined(INK6)
 #define EPD_WIDTH 240
 #define EPD_HEIGHT 240
-#else
-#define EPD_WIDTH 200
-#define EPD_HEIGHT 200
 #endif
 
 #define GALLERY_DIR "/spiffs/gallery"
 #define MAX_IMAGES 100
 
-// 外部变量
-extern unsigned char BlackImage[ALLSCREEN_BYTES];
+// 外部变量（BlackImage 由 eink_display.h 声明，各驱动 .cpp 提供）
 
 // 当前显示的图片索引
 static int s_current_image_index = 0;
@@ -172,6 +163,60 @@ static void rotate_image(uint8_t* image, int width, int height, int degrees) {
 
     free(temp);
     Serial.printf("Gallery: Image rotated %d degrees (2-bit format)\n", degrees);
+}
+
+// 旋转图像数据（1位色深黑白格式，每字节 8 个像素，高位在前，bit=1 为白）
+static void rotate_image_bw(uint8_t* image, int width, int height, int degrees) {
+    if (degrees == 0) return;
+
+    int total_bytes = width * height / 8;
+
+    uint8_t* temp = (uint8_t*)malloc(total_bytes);
+    if (!temp) {
+        Serial.println("Gallery: Failed to allocate rotation buffer");
+        return;
+    }
+
+    memcpy(temp, image, total_bytes);
+    memset(image, 0, total_bytes);
+
+    // 辅助函数：获取像素值（1位）
+    auto get_pixel = [temp, width](int x, int y) -> uint8_t {
+        int pixel_index = y * width + x;
+        uint8_t b = temp[pixel_index / 8];
+        return (b >> (7 - (pixel_index % 8))) & 0x01;
+    };
+
+    // 辅助函数：设置像素值（1位）
+    auto set_pixel = [image, width](int x, int y, uint8_t value) {
+        int pixel_index = y * width + x;
+        if (value) {
+            image[pixel_index / 8] |= (0x80 >> (pixel_index % 8));
+        }
+    };
+
+    if (degrees == 90) {
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                set_pixel(height - 1 - y, x, get_pixel(x, y));
+            }
+        }
+    } else if (degrees == 180) {
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                set_pixel(width - 1 - x, height - 1 - y, get_pixel(x, y));
+            }
+        }
+    } else if (degrees == 270) {
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                set_pixel(y, width - 1 - x, get_pixel(x, y));
+            }
+        }
+    }
+
+    free(temp);
+    Serial.printf("Gallery: Image rotated %d degrees (1-bit format)\n", degrees);
 }
 
 // 执行循环切换
@@ -343,6 +388,17 @@ bool gallery_display_image(const char* filename) {
         return false;
     }
 
+    // 先校验文件大小：换屏型后旧图片位深不同，直接显示会变成乱码
+    fseek(fp, 0, SEEK_END);
+    long file_size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (file_size != (long)ALLSCREEN_BYTES) {
+        Serial.printf("Gallery: %s size %ld mismatch (expected %u), skip\n",
+                      filename, file_size, (unsigned)ALLSCREEN_BYTES);
+        fclose(fp);
+        return false;
+    }
+
     size_t read_size = fread(BlackImage, 1, ALLSCREEN_BYTES, fp);
     fclose(fp);
 
@@ -357,22 +413,17 @@ bool gallery_display_image(const char* filename) {
         s_rotation = load_config_ns("gallery", "rotation");
     }
 
-    #ifdef INK6
+    // 应用旋转（各屏型的位深不同，使用对应的旋转实现）
     if (s_rotation != 0) {
+#if defined(INK6)
         rotate_image6(BlackImage, EPD_WIDTH, EPD_HEIGHT, s_rotation);
-    }
-    epdDisplayImage(BlackImage,sizeof(BlackImage));
-
-    #else
-    // 应用旋转
-    if (s_rotation != 0) {
+#elif defined(INK_BW)
+        rotate_image_bw(BlackImage, EPD_WIDTH, EPD_HEIGHT, s_rotation);
+#else
         rotate_image(BlackImage, EPD_WIDTH, EPD_HEIGHT, s_rotation);
+#endif
     }
-
-    EPD_init_Fast2();
-    PIC_display(BlackImage);
-    EPD_sleep();
-    #endif
+    eink_display_frame();
 
     Serial.printf("Gallery: Displayed %s (rotation: %d deg)\n", filename, s_rotation);
     return true;
@@ -566,13 +617,7 @@ int gallery_setup(void) {
     } else {
         // 无图片：清空画布并居中显示提示（中文走 GB2312 字库，随全局显示方向旋转）
         gallery_draw_empty_prompt();
-#ifdef INK6
-        epdDisplayImage(BlackImage, ALLSCREEN_BYTES);
-#else
-        EPD_init_Fast2();
-        PIC_display(BlackImage);
-        EPD_sleep();
-#endif
+        eink_display_frame();
     }
 
     Serial.printf("Gallery: Initialized with %d images\n", s_image_list.size());
