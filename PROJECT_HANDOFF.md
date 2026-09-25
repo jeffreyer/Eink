@@ -1346,5 +1346,4 @@ local value = CONFIG.key or default
 ---
 
 **文档版本**: v2.1  
-**最后更新**: 2025-01-XX  
 **维护者**: jeffreyer

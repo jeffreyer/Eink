@@ -8,4 +8,4 @@
 /misc/
 /tools/fonts/
 *.pyc
-/tools/lua-simulator/*.lua
+

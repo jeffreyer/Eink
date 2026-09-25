@@ -1,12 +1,10 @@
 #include "common.h"
-#include "touch_icons.h"
 #include "esp_sleep.h"
 #include "sleep_manager.h"
 #include "ble_config.h"
 #include "app_control.h"
 #include "module_registry.h"
 #include "lua_hardware_api.h"
-#include "auto_ota.h"
 #include "time_calibration.h"
 #include <Preferences.h>
 #include "battery.h"

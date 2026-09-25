@@ -4,7 +4,6 @@
 #include "common.h"
 #include "module_registry.h"
 #include "sleep_manager.h"
-#include "touch_icons.h"
 #include "time_calibration.h"
 #include "gallery.h"
 #include "battery.h"
