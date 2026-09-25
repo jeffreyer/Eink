@@ -1103,6 +1103,4 @@ end
 ---
 
 **版本**: 1.0.0  
-**最后更新**: 2025-01-XX  
-**适用设备**: MiniEink (ESP32-C3 + 200×200 墨水屏)  
-**基于项目**: Bottle Lua Framework
+**适用设备**: MiniEink (ESP32-C3 墨水屏)  
