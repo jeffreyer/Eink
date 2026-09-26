@@ -9,6 +9,10 @@
 > power model: the MCU issues the refresh command and sleeps immediately, waking only to
 > power the panel down.
 
+ <img src="docs/prod.jpg" width = "500" align=center />
+ <img src="docs/pcb.jpg" width = "500" align=center />
+ <img src="docs/asm.jpg" width = "500" align=center />
+
 ---
 
 ## 目录
@@ -38,6 +42,11 @@ MiniEink 是一个基于 ESP32-C3 的多色墨水屏设备。设备平时处于*
 
 ## 2. 特性
 
+**硬件**
+
+- 外观尺寸：43*36*8.5mm
+- 续航：200mA，休眠28uA，每次刷新40uA，每小时刷新一次，可续航4个月左右
+
 **屏幕**
 
 - 一套代码支持三种 1.54" 墨水屏，靠一个宏切换（见 3.2）
@@ -59,9 +68,11 @@ MiniEink 是一个基于 ESP32-C3 的多色墨水屏设备。设备平时处于*
 ## 3. 硬件
 
 ### 3.0 硬件制作注意事项
-- 如果使用6色屏请不要焊接R18电阻
-- Gerber.rar为已验证项目，直接打样即可
+
+- Gerber.rar为已验证项目，直接打样即可，PCB厚度0.8mm
 - 工程文件修改PCB挖空TypeC区域使用了TypeC沉板接口设计，厚度进一步降低0.8mm，但未作打样验证
+- 如果使用6色屏请不要焊接R18电阻
+- 参考上述图片组装硬件，最后胶水粘合上下外壳
 
 ### 3.1 规格与引脚
 
